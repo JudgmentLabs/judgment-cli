@@ -3,7 +3,7 @@ output "aws_mq_broker_rabbitmq-judgment_id" {
 }
 
 output "aws_mq_broker_rabbitmq-judgment_url" {
-  value = regex("^(?:[a-zA-Z]+://)?([^:]+)", aws_mq_broker.rabbitmq-judgment.instances[0].endpoints[0])
+  value = regex("^(?:[a-zA-Z]+://)?([^:]+)", aws_mq_broker.rabbitmq-judgment.instances[0].endpoints[0])[0]
   # Exclude protocol and port
 }
 

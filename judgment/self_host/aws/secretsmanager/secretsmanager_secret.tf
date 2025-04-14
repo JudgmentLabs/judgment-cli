@@ -3,7 +3,7 @@ resource "aws_secretsmanager_secret" "prod_api_keys_misc" {
   name        = "prod/api-keys/misc"
 }
 
-resource "aws_secretsmanager_secret_version" "full_secret" {
+resource "aws_secretsmanager_secret_version" "prod_api_keys_misc_version" {
   secret_id     = aws_secretsmanager_secret.prod_api_keys_misc.id
   secret_string = jsonencode({
     SUPABASE_URL = var.supabase_url
@@ -37,7 +37,7 @@ resource "aws_secretsmanager_secret" "prod_creds_rabbitmq" {
   name        = "prod/creds/rabbitmq"
 }
 
-resource "aws_secretsmanager_secret_version" "full_secret" {
+resource "aws_secretsmanager_secret_version" "prod_creds_rabbitmq_version" {
   secret_id     = aws_secretsmanager_secret.prod_creds_rabbitmq.id
   secret_string = jsonencode({
     RABBITMQ_USER = "admin"

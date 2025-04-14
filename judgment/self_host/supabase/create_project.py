@@ -2,6 +2,7 @@ import os
 import time
 import json
 import requests
+import psycopg2
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -67,6 +68,7 @@ def get_api_keys(project_ref: str) -> tuple[str, str]:
     return anon, service_role
 
 def get_project_jwt_secret(project_ref: str) -> str:
+    print("Fetching JWT secret...")
     url = f"https://api.supabase.com/v1/projects/{project_ref}/postgrest"
     res = requests.get(url, headers=HEADERS)
     res.raise_for_status()
@@ -94,6 +96,11 @@ def create_project_and_get_secrets(supabase_token: str = SUPABASE_TOKEN, org_id:
     anon_key, service_role_key = get_api_keys(project_ref)
     jwt_secret = get_project_jwt_secret(project_ref)
 
+    # Load Judgment schema onto the database
+    load_schema(url, db_password)
+
+    print("Supabase project created and schema loaded successfully!")
+
     output = {
         "supabase_url": url,
         "supabase_anon_key": anon_key,
@@ -101,11 +108,16 @@ def create_project_and_get_secrets(supabase_token: str = SUPABASE_TOKEN, org_id:
         "supabase_jwt_secret": jwt_secret,
         "supabase_project_id": project_id
     }
-    
+
     return output
 
-def main():
-    create_project_and_get_secrets()
-    
-if __name__ == "__main__":
-    main()
+def load_schema(db_url: str, db_password: str):
+    print("Loading schema...")
+    with open(os.path.abspath(os.path.join(os.path.dirname(__file__), 'schema.sql')), 'r') as file:
+        schema_sql = file.read()
+    conn = psycopg2.connect(f"postgres://postgres:{db_password}@db.{db_url.replace('https://', '')}:5432/postgres")
+    cursor = conn.cursor()
+    cursor.execute(schema_sql)
+    conn.commit()
+    cursor.close()
+    conn.close()
