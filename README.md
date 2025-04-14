@@ -36,14 +36,20 @@ To deploy a self-hosted instance of Judgment:
 {
     "supabase_token": "your_supabase_token_here",
     "org_id": "your_organization_id_here",
-    "db_password": "your_database_password_here"
+    "db_password": "your_database_password_here",
+    "langfuse_public_key": "your_langfuse_public_key_here",
+    "langfuse_secret_key": "your_langfuse_secret_key_here",
+    "openai_api_key": "your_openai_api_key_here",
+    "togetherai_api_key": "your_togetherai_api_key_here",
+    "anthropic_api_key": "your_anthropic_api_key_here"
 }
 ```
 
 2. Run the self-host command:
 ```bash
-judgment self-host --supabase-creds supabase_creds.json
+judgment self-host --creds-file creds.json --supabase-compute-size nano
 ```
+*Keep in mind that for `--supabase-compute-size`, only "nano" is available on the free tier of Supabase.*
 
 This will:
 1. Create a new Supabase project
