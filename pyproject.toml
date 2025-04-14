@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "judgment"
+version = "0.1.0"
+description = "CLI tool for managing self-hosted instances of Judgment"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "typer>=0.9.0",
+    "python-dotenv>=0.19.0",
+    "requests>=2.26.0",
+]
+
+[project.scripts]
+judgment = "judgment.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["judgment"] 

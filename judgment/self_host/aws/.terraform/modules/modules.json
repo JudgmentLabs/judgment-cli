@@ -1,0 +1,1 @@
+{"Modules":[{"Key":"","Source":"","Dir":"."},{"Key":"alb","Source":"./alb","Dir":"alb"},{"Key":"ecs","Source":"./ecs","Dir":"ecs"},{"Key":"iam","Source":"./iam","Dir":"iam"},{"Key":"mq","Source":"./mq","Dir":"mq"},{"Key":"secretsmanager","Source":"./secretsmanager","Dir":"secretsmanager"},{"Key":"sg","Source":"./sg","Dir":"sg"},{"Key":"vpc","Source":"./vpc","Dir":"vpc"}]}
