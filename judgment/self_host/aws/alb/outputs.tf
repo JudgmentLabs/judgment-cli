@@ -45,3 +45,7 @@ output "judgment_lb_arn" {
 # output "rabbitmq_network_lb_id" {
 #   value = "${aws_lb.rabbitmq_networklb.id}"
 # }
+
+output "judgment_lb_dns_name" {
+  value = "${aws_lb.judgment_lb.dns_name}"
+}

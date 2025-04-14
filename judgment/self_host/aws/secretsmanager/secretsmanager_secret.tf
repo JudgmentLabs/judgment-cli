@@ -15,9 +15,24 @@ resource "aws_secretsmanager_secret_version" "prod_api_keys_misc_version" {
     RABBITMQ_USER = "admin"
     RABBITMQ_PASSWORD = "password12345"
     AWS_MQ_BROKER_NAME = var.rabbitmq_broker_name
+    AWS_MQ_BROKER_ID = var.rabbitmq_broker_id
     RABBITMQ_RUN_EVAL_QUEUE = "run_eval_queue"
     RABBITMQ_TRACE_EVAL_QUEUE = "trace_eval_queue"
     FRONTEND_URL = "https://app.judgmentlabs.ai"
+    BACKEND_URL = var.judgment_lb_dns_name
+    PYTHON_PATH = "."
+    CUSTOM_MODEL_INPUT_TOKEN_COST = 0.0000025
+    CUSTOM_MODEL_OUTPUT_TOKEN_COST = 0.00001
+    LITELLM_LOG = "DEBUG"
+    "TEST!" = "hehetesttest"
+    LANGFUSE_HOST = "https://us.cloud.langfuse.com"
+    LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
+    LANGFUSE_SECRET_KEY = var.langfuse_secret_key
+    # SLACK_CLIENT_ID = var.slack_client_id
+    # SLACK_CLIENT_SECRET = var.slack_client_secret
+    # SLACK_OAUTH_REDIRECT_URI = "https://app.judgmentlabs.ai/slack/oauth_redirect"
+    # SLACK_SIGNING_SECRET = var.slack_signing_secret
+    # SLACK_SCOPES = "chat:write,chat:write.public,commands"
 
   })
 }
@@ -27,9 +42,24 @@ resource "aws_secretsmanager_secret" "prod_api_keys_openai" {
   name        = "prod/api-keys/openai"
 }
 
+resource "aws_secretsmanager_secret_version" "prod_api_keys_openai_version" {
+  secret_id     = aws_secretsmanager_secret.prod_api_keys_openai.id
+  secret_string = jsonencode({
+    OPENAI_API_KEY = var.openai_api_key
+    TOGETHERAI_API_KEY = var.togetherai_api_key
+    ANTHROPIC_API_KEY = var.anthropic_api_key
+  })
+}
+
 resource "aws_secretsmanager_secret" "prod_api_keys_stripe" {
   description = "Stripe API keys"
   name = "prod/api-keys/stripe"
+}
+
+resource "aws_secretsmanager_secret_version" "prod_api_keys_stripe_version" {
+  secret_id     = aws_secretsmanager_secret.prod_api_keys_stripe.id
+  secret_string = jsonencode({
+  })
 }
 
 resource "aws_secretsmanager_secret" "prod_creds_rabbitmq" {

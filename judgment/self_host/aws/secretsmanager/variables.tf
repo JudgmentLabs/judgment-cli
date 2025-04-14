@@ -26,3 +26,42 @@ variable "rabbitmq_broker_name" {
   type = string
 }
 
+variable "rabbitmq_broker_id" {
+  type = string
+}
+
+# variable "slack_client_id" {
+#   type = string
+# }
+
+# variable "slack_client_secret" {
+#   type = string
+# }
+
+# variable "slack_signing_secret" {
+#   type = string
+# }
+
+variable "langfuse_public_key" {
+  type = string
+}
+
+variable "langfuse_secret_key" {
+  type = string
+}
+
+variable "judgment_lb_dns_name" {
+  type = string
+}
+
+variable "openai_api_key" {
+  type = string
+}
+
+variable "togetherai_api_key" {
+  type = string
+}
+
+variable "anthropic_api_key" {
+  type = string
+}

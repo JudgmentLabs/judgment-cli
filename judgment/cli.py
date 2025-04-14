@@ -24,14 +24,14 @@ class ComputeSize(str, Enum):
 
 @app.command(name="self-host")
 def self_host(
-    supabase_creds: Annotated[Path, typer.Option(
-        "--supabase-creds",
+    creds_file: Annotated[Path, typer.Option(
+        "--creds-file",
         "-c",
-        help="Path to Supabase credentials file",
+        help="Path to file containing required credentials",
         exists=True,
         readable=True,
         dir_okay=False
-    )] = "supabase_creds.json", 
+    )] = "creds.json", 
     supabase_compute_size: Annotated[ComputeSize, typer.Option(
         "--supabase-compute-size",
         "-s",
@@ -47,14 +47,14 @@ def self_host(
     """
     # Load credentials from file
     try:
-        with open(supabase_creds, 'r') as f:
+        with open(creds_file, 'r') as f:
             creds = json.load(f)
     except json.JSONDecodeError:
         typer.echo("Error: Invalid JSON in credentials file", err=True)
         raise typer.Exit(1)
     
     # Validate required credentials
-    required_fields = ['supabase_token', 'org_id', 'db_password']
+    required_fields = ['supabase_token', 'org_id', 'db_password', 'langfuse_public_key', 'langfuse_secret_key', 'openai_api_key', 'togetherai_api_key', 'anthropic_api_key']
     missing_fields = [field for field in required_fields if field not in creds]
     if missing_fields:
         typer.echo(f"Error: Missing required fields in credentials file: {', '.join(missing_fields)}", err=True)
@@ -62,7 +62,7 @@ def self_host(
     
     # Run the deployment
     try:
-        deploy(creds['supabase_token'], creds['org_id'], "Judgment Database", creds['db_password'], supabase_compute_size)
+        deploy(creds, supabase_compute_size)
     except Exception as e:
         typer.echo(f"Error during deployment: {str(e)}", err=True)
         raise typer.Exit(1)
