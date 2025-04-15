@@ -58,6 +58,12 @@ resource "aws_ecs_task_definition" "judgment_websockets_td" {
   }
 
   task_role_arn = var.ecs_task_execution_role_arn
+
+  depends_on = [
+    var.prod_api_keys_misc_version_arn,
+    var.prod_api_keys_openai_version_arn,
+    var.prod_creds_rabbitmq_version_arn
+  ]
 }
 
 resource "aws_ecs_task_definition" "run_eval_worker_td" {
@@ -114,6 +120,12 @@ resource "aws_ecs_task_definition" "run_eval_worker_td" {
   }
 
   task_role_arn = var.ecs_task_execution_role_arn
+
+  depends_on = [
+    var.prod_api_keys_misc_version_arn,
+    var.prod_api_keys_openai_version_arn,
+    var.prod_creds_rabbitmq_version_arn
+  ]
 }
 
 resource "aws_ecs_task_definition" "judgment_backend_server_td" {
@@ -176,6 +188,12 @@ resource "aws_ecs_task_definition" "judgment_backend_server_td" {
   }
 
   task_role_arn = var.ecs_task_execution_role_arn
+
+  depends_on = [
+    var.prod_api_keys_misc_version_arn,
+    var.prod_api_keys_openai_version_arn,
+    var.prod_creds_rabbitmq_version_arn
+  ]
 }
 
 resource "aws_ecs_task_definition" "trace_eval_worker_td" {
@@ -232,4 +250,10 @@ resource "aws_ecs_task_definition" "trace_eval_worker_td" {
   }
 
   task_role_arn = var.ecs_task_execution_role_arn
+
+  depends_on = [
+    var.prod_api_keys_misc_version_arn,
+    var.prod_api_keys_openai_version_arn,
+    var.prod_creds_rabbitmq_version_arn
+  ]
 }

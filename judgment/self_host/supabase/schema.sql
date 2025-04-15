@@ -2031,6 +2031,10 @@ CREATE OR REPLACE TRIGGER "update_user_org_resources_updated_at" BEFORE UPDATE O
 
 
 
+CREATE OR REPLACE TRIGGER "on_user_registration" AFTER INSERT ON "auth"."users" FOR EACH ROW EXECUTE FUNCTION "public"."handle_new_user_data"();
+
+
+
 ALTER TABLE ONLY "public"."alerts"
     ADD CONSTRAINT "alerts_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id");
 

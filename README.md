@@ -1,19 +1,58 @@
 # Judgment CLI Tool
 
-A command-line tool for managing self-hosted instances of Judgment.
+A command-line tool for Judgment.
 
 ## Installation
 
-Install the Judgment CLI:
+Clone the repository and install the Judgment CLI:
 ```bash
+git clone https://github.com/JudgmentLabs/judgment-cli.git
+cd judgment-cli
 pip install -e .
 ```
 
 ## Usage
 
+To see usage information, run:
+```bash
+judgment --help
+```
+
+Available commands:
+- `judgment self-host`: Deploy a self-hosted instance of Judgment.
+
+See below for more details on each command.
+
 ### Self-Hosting
 
-Make sure Terraform CLI is installed.
+To see usage information, run:
+```bash
+judgment self-host --help
+```
+
+#### Prerequisites
+
+**First, make sure AWS CLI is installed and configured.**
+
+On Mac:
+```bash
+brew install awscli
+```
+
+On Windows:
+Download and run the installer from [here](https://awscli.amazonaws.com/AWSCLIV2.msi)
+
+On Linux:
+```bash
+sudo apt install awscli
+```
+
+*An empty/new AWS account is required to deploy the infrastructure. After one has been created, configure your local environment with the relevant AWS credentials by running the following command:*
+```bash
+aws configure
+```
+
+**Second, make sure Terraform CLI is installed.**
 
 On Mac:
 ```bash
@@ -29,14 +68,18 @@ choco install terraform
 On Linux:
 Instructions [here](https://developer.hashicorp.com/terraform/tutorials/aws-get-started/install-cli)
 
+**Third, make sure you have access to a [Supabase account and organization](https://supabase.com/dashboard/sign-in?returnTo=%2Fprojects). This command will automatically create and configure a new Supabase project in this organization.**
+
+#### Deploying
+
 To deploy a self-hosted instance of Judgment:
 
-1. Create a credentials file (e.g., `supabase_creds.json`) with the following format:
+1. Create a credentials file (e.g., `creds.json`) with the following format:
 ```json
 {
-    "supabase_token": "your_supabase_token_here",
-    "org_id": "your_organization_id_here",
-    "db_password": "your_database_password_here",
+    "supabase_token": "your_supabase_personal_access_token_here",
+    "org_id": "your_supabase_organization_id_here",
+    "db_password": "your_desired_supabase_database_password_here",
     "langfuse_public_key": "your_langfuse_public_key_here",
     "langfuse_secret_key": "your_langfuse_secret_key_here",
     "openai_api_key": "your_openai_api_key_here",
@@ -45,13 +88,14 @@ To deploy a self-hosted instance of Judgment:
 }
 ```
 
-2. Run the self-host command:
+2. Run the self-host command with the appropriate arguments. For example:
 ```bash
-judgment self-host --creds-file creds.json --supabase-compute-size nano
+judgment self-host --root-judgment-email root@judgment.com --root-judgment-password password --creds-file creds.json --supabase-compute-size nano
 ```
-*Keep in mind that for `--supabase-compute-size`, only "nano" is available on the free tier of Supabase.*
+*Keep in mind that for `--supabase-compute-size`, only "nano" is available on the free tier of Supabase. If you want to use a larger size, you will need to upgrade your organization to a paid plan.*
 
-This will:
+This command will:
 1. Create a new Supabase project
-2. Deploy the AWS infrastructure using Terraform
-3. Configure the application with the necessary credentials
+2. Deploy the Judgment AWS infrastructure using Terraform
+3. Configure the AWS infrastructure to communicate with the new Supabase database
+4. Create a root Judgment user in the self-hosted environment with the email and password provided

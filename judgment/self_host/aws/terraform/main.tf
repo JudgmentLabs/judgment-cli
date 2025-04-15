@@ -19,6 +19,9 @@ module ecs {
   ecs_task_execution_role_arn = module.iam.ecs_task_execution_role_arn
   judgment_lb_id = module.alb.judgment_lb_id
   judgment_lb_arn = module.alb.judgment_lb_arn
+  prod_api_keys_misc_version_arn = module.secretsmanager.prod_api_keys_misc_version_arn
+  prod_api_keys_openai_version_arn = module.secretsmanager.prod_api_keys_openai_version_arn
+  prod_creds_rabbitmq_version_arn = module.secretsmanager.prod_creds_rabbitmq_version_arn
 }
 
 module iam {

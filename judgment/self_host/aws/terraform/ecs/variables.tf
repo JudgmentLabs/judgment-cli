@@ -42,3 +42,15 @@ variable "judgment_lb_id" {
 variable "judgment_lb_arn" {
   type = string
 }
+
+variable "prod_api_keys_misc_version_arn" {
+  type = string
+}
+
+variable "prod_api_keys_openai_version_arn" {
+  type = string
+}
+
+variable "prod_creds_rabbitmq_version_arn" {
+  type = string
+}
