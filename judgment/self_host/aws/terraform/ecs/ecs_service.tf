@@ -262,4 +262,3 @@ resource "aws_appautoscaling_policy" "trace_eval_worker_scale_policy" {
     }
   }
 }
-

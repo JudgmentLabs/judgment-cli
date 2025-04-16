@@ -30,18 +30,6 @@ variable "rabbitmq_broker_id" {
   type = string
 }
 
-# variable "slack_client_id" {
-#   type = string
-# }
-
-# variable "slack_client_secret" {
-#   type = string
-# }
-
-# variable "slack_signing_secret" {
-#   type = string
-# }
-
 variable "langfuse_public_key" {
   type = string
 }

@@ -58,5 +58,3 @@ variable "prod_creds_rabbitmq_version_arn" {
 variable "mq_broker_name" {
   type = string
 }
-
-

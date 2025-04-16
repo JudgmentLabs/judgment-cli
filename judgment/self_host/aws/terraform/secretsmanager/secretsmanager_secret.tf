@@ -28,12 +28,6 @@ resource "aws_secretsmanager_secret_version" "prod_api_keys_misc_version" {
     LANGFUSE_HOST = "https://us.cloud.langfuse.com"
     LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
     LANGFUSE_SECRET_KEY = var.langfuse_secret_key
-    # SLACK_CLIENT_ID = var.slack_client_id
-    # SLACK_CLIENT_SECRET = var.slack_client_secret
-    # SLACK_OAUTH_REDIRECT_URI = "https://app.judgmentlabs.ai/slack/oauth_redirect"
-    # SLACK_SIGNING_SECRET = var.slack_signing_secret
-    # SLACK_SCOPES = "chat:write,chat:write.public,commands"
-
   })
 }
 

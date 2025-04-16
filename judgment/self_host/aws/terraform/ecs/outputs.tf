@@ -45,4 +45,3 @@ output "trace_eval_worker_task_definition_id" {
   description = "The ID of the Trace Eval Worker task definition"
   value       = aws_ecs_task_definition.trace_eval_worker_td.id
 }
-

@@ -1,19 +1,3 @@
-# resource "aws_default_vpc" "judgment_vpc" {
-# }
-
-# data "aws_availability_zones" "available" {
-#   state = "available"
-#   filter {
-#     name   = "region-name"
-#     values = ["us-west-1"]
-#   }
-# }
-
-# resource "aws_default_subnet" "subnets" {
-#   count = length(data.aws_availability_zones.available.names)
-#   availability_zone = data.aws_availability_zones.available.names[count.index]
-# }
-
 data "aws_availability_zones" "available" {
   state = "available"
 }
