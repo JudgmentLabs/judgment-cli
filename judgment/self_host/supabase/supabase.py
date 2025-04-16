@@ -3,6 +3,7 @@ import time
 import json
 import requests
 import psycopg2
+import typer
 from dotenv import load_dotenv
 from typing import Optional, Tuple, Dict, Callable
 from contextlib import contextmanager
@@ -123,12 +124,20 @@ class SupabaseClient:
         # Check for existing project
         existing_project = self.get_existing_project(project_name)
         if existing_project:
-            raise ValueError(f"A project named '{project_name}' already exists in this organization. Please choose a different name or delete the existing project.")
-
+            
+            if not typer.confirm(f"A project named '{project_name}' already exists in this organization. Has this project been configured for Judgment?"):
+                print("Please choose a different name or delete the existing project.")
+                raise typer.Exit(1)
+            
         # Create new project
-        project = self.create_project(project_name, supabase_compute_size)
-        project_ref = project["id"]
-        project_id = project["id"]
+        if not existing_project:
+            project = self.create_project(project_name, supabase_compute_size)
+            project_ref = project["id"]
+            project_id = project["id"]
+        else:
+            project_ref = existing_project["id"]
+            project_id = existing_project["id"]
+
         url = f"https://{project_ref}.supabase.co"
         self.wait_for_project_ready(project_ref)
 
@@ -136,9 +145,11 @@ class SupabaseClient:
         jwt_secret = self.get_project_jwt_secret(project_ref)
 
         # Load Judgment schema onto the database
-        self.load_schema(url)
-
-        print("Supabase project created and schema loaded successfully!")
+        if not existing_project:
+            self.load_schema(url)
+            print("Supabase project created and schema loaded successfully!")
+        else:
+            print("Retrieved existing project secrets...")
 
         return {
             "supabase_url": url,
@@ -146,4 +157,4 @@ class SupabaseClient:
             "supabase_service_role_key": service_role_key,
             "supabase_jwt_secret": jwt_secret,
             "supabase_project_id": project_id
-        } 
+        }, existing_project is not None

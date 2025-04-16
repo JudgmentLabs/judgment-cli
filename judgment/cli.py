@@ -6,11 +6,13 @@ import requests
 from pathlib import Path
 from typing import Optional
 from enum import Enum
-from .command_utils.self_host import deploy
+from .command_utils.self_host import deploy, create_https_listener
 from typing_extensions import Annotated
 
 
 app = typer.Typer(help="Judgment CLI tool for managing self-hosted instances.", add_completion=False)
+self_host_app = typer.Typer(help="Commands for self-hosting Judgment", add_completion=False)
+app.add_typer(self_host_app, name="self-host")
 
 class ComputeSize(str, Enum):
     nano = "nano"
@@ -25,7 +27,7 @@ class ComputeSize(str, Enum):
     twelve_xlarge = "12xlarge"
     sixteen_xlarge = "16xlarge"
 
-@app.command(name="self-host")
+@self_host_app.command(name="main")
 def self_host(
     root_judgment_email: Annotated[str, typer.Option(
         "--root-judgment-email",
@@ -36,6 +38,11 @@ def self_host(
         "--root-judgment-password",
         "-p",
         help="Password for the root Judgment user in the self-hosted environment"
+    )],
+    domain_name: Annotated[str, typer.Option(
+        "--domain-name",
+        "-d",
+        help="Domain name to request SSL certificate for (make sure you own this domain)"
     )],
     creds_file: Annotated[Path, typer.Option(
         "--creds-file",
@@ -52,7 +59,7 @@ def self_host(
     )] = "small"
     ):
     """
-    Deploy a self-hosted instance of Judgment.
+    Deploy a self-hosted instance of Judgment without an HTTPS listener.
     
     This command will:
     1. Create a new Supabase project
@@ -126,17 +133,29 @@ def self_host(
     if not typer.confirm(f"\nAre you sure you want to deploy Judgment to AWS account {account_id}?"):
         typer.echo("Deployment cancelled.")
         raise typer.Exit(0)
+    
+    if not typer.confirm(f"\nAre you sure you want to deploy Judgment under domain {domain_name}?"):
+        typer.echo("Deployment cancelled.")
+        raise typer.Exit(0)
 
     typer.echo()
     
-    
     # Run the deployment
     try:
-        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password)
+        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name)
     except Exception as e:
         typer.echo(f"Error during deployment: {str(e)}", err=True)
         raise typer.Exit(1)
     
+@self_host_app.command(name="https-listener")
+def https_listener():
+    """
+    Create a new HTTPS listener for the Judgment Load Balancer (only run this after executing 'judgment self-host main' first).
+    """
+    create_https_listener()
+    
+
+
 # Still require calling subcommand even if there is only one
 @app.callback()
 def callback():

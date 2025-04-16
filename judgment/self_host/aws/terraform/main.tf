@@ -1,3 +1,8 @@
+module acm {
+  source = "./acm"
+  domain_name = var.domain_name
+}
+
 module alb {
   source = "./alb"
   subnet_ids = module.vpc.all_subnets
@@ -22,6 +27,7 @@ module ecs {
   prod_api_keys_misc_version_arn = module.secretsmanager.prod_api_keys_misc_version_arn
   prod_api_keys_openai_version_arn = module.secretsmanager.prod_api_keys_openai_version_arn
   prod_creds_rabbitmq_version_arn = module.secretsmanager.prod_creds_rabbitmq_version_arn
+  mq_broker_name = module.mq.aws_mq_broker_rabbitmq-judgment_name
 }
 
 module iam {

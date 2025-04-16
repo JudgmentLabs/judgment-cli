@@ -155,6 +155,41 @@ resource "aws_ecs_service" "RunEvalWorker" {
   task_definition     = aws_ecs_task_definition.run_eval_worker_td.arn
 }
 
+resource "aws_appautoscaling_target" "run_eval_worker_target" {
+  max_capacity       = 10
+  min_capacity       = 3
+  resource_id        = "service/${var.cluster_name}/${aws_ecs_service.RunEvalWorker.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "run_eval_worker_scale_policy" {
+  name               = "run-eval-worker-scaling-policy"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.run_eval_worker_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.run_eval_worker_target.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.run_eval_worker_target.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = 50 # average messages count threshold
+    scale_in_cooldown  = 60
+    scale_out_cooldown = 60
+
+    customized_metric_specification {
+      metric_name = "MessageCount"
+      namespace   = "AWS/AmazonMQ"
+      statistic   = "Average"
+
+      dimensions {
+        name  = "Broker"
+        value = var.mq_broker_name
+      }
+
+      unit = "Count"
+    }
+  }
+}
+
 resource "aws_ecs_service" "TraceEvalWorker" {
 
   capacity_provider_strategy {
@@ -192,3 +227,39 @@ resource "aws_ecs_service" "TraceEvalWorker" {
   scheduling_strategy = "REPLICA"
   task_definition     = aws_ecs_task_definition.trace_eval_worker_td.arn
 }
+
+resource "aws_appautoscaling_target" "trace_eval_worker_target" {
+  max_capacity       = 10
+  min_capacity       = 3
+  resource_id        = "service/${var.cluster_name}/${aws_ecs_service.TraceEvalWorker.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "trace_eval_worker_scale_policy" {
+  name               = "trace-eval-worker-scaling-policy"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.trace_eval_worker_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.trace_eval_worker_target.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.trace_eval_worker_target.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = 50 # average messages count threshold
+    scale_in_cooldown  = 60
+    scale_out_cooldown = 60
+
+    customized_metric_specification {
+      metric_name = "MessageCount"
+      namespace   = "AWS/AmazonMQ"
+      statistic   = "Average"
+
+      dimensions {
+        name  = "Broker"
+        value = var.mq_broker_name
+      }
+
+      unit = "Count"
+    }
+  }
+}
+

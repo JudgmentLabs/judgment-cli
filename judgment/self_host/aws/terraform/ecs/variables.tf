@@ -54,3 +54,9 @@ variable "prod_api_keys_openai_version_arn" {
 variable "prod_creds_rabbitmq_version_arn" {
   type = string
 }
+
+variable "mq_broker_name" {
+  type = string
+}
+
+
