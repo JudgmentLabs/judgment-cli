@@ -108,6 +108,7 @@ This command will:
 6. ** (Optional) Wait for the certificate to be issued and then set up the HTTPS listener
 
 \* For the certificate to be issued, this command will return two DNS records that must be manually added to your DNS registrar/service.
+
 ** You will be prompted to either continue with the HTTPS listener setup now or to come back later. If you choose to proceed with the setup now, the program will wait for the certificate to be issued before continuing. If you choose to come back later, refer to the section below for a dedicated HTTPS listener setup command.
 
 
