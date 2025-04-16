@@ -19,15 +19,19 @@ judgment --help
 ```
 
 Available commands:
-- `judgment self-host`: Deploy a self-hosted instance of Judgment.
+- `judgment self-host`
+  - `judgment self-host main`: Deploy a self-hosted instance of Judgment (and optionally set up the HTTPS listener).
+  - `judgment self-host https-listener`: Set up the HTTPS listener for a self-hosted Judgment instance.
 
 See below for more details on each command.
 
 ### Self-Hosting
 
-To see usage information, run:
+To see usage information, run any of the following:
 ```bash
 judgment self-host --help
+judgment self-host main --help
+judgment self-host https-listener --help
 ```
 
 #### --- Prerequisites ---

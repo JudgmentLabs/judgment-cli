@@ -59,7 +59,7 @@ def self_host(
     )] = "small"
     ):
     """
-    Deploy a self-hosted instance of Judgment without an HTTPS listener.
+    Deploy a self-hosted instance of Judgment (and optionally set up an HTTPS listener).
     
     This command will:
     1. Create a new Supabase project
