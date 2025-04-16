@@ -1,6 +1,9 @@
 import subprocess
 import os
 import typer
+import boto3
+import time
+import datetime
 from ..self_host.supabase.supabase import SupabaseClient
 
 def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, root_judgment_password: str, domain_name: str):
@@ -38,6 +41,7 @@ def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, ro
         f'-auto-approve'
     )
     
+
     # Run terraform apply
     print("\nApplying Terraform configuration...")
     subprocess.run(terraform_cmd, shell=True, check=True)
@@ -47,12 +51,13 @@ def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, ro
     judgment_lb_dns_name = subprocess.check_output(['terraform', 'output', '-raw', 'judgment_lb_dns_name']).decode('utf-8').strip()
     print(f"Judgment self-hosted deployment completed successfully!")
     print(f"You can access your self-hosted Judgment server at:\n\n{judgment_lb_dns_name}\n")
-    print("Please keep this URL safe.")
 
     judgment_certificate_domain_validation_name = subprocess.check_output(['terraform', 'output', '-raw', 'judgment_certificate_domain_validation_name']).decode('utf-8').strip()
     judgment_certificate_domain_validation_value = subprocess.check_output(['terraform', 'output', '-raw', 'judgment_certificate_domain_validation_value']).decode('utf-8').strip()
     
-    print("To set up a secure HTTPS listener, first go to your DNS registrar/service and create two records:")
+    print("*** Next step: HTTPS listener setup ***")
+    print("As part of deployment, an SSL certificate request was made through ACM. To set up a secure HTTPS listener, the certificate must undergo DNS validation before it can be issued and used by the listener. Additionally, your specified domain name must be mapped to the Judgment load balancer DNS name.\n")
+    print("To accomplish this, these two records must be added to your DNS registrar/service.")
 
     print("\n=== Required DNS Records ===\n")
     print("1. Certificate Validation Record:")
@@ -64,9 +69,30 @@ def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, ro
     print(f"   Type:    CNAME")
     print(f"   Name:    {domain_name}")
     print(f"   Value:   {judgment_lb_dns_name}\n")
+
+    while True:
+        if not typer.confirm("Have you copied down these records and/or added them to your DNS registrar/service?"):
+            print("Please copy down these records and then press 'y' when asked again...")
+        else:
+            break
+
+    print("\nYou have the choice to set up the HTTPS listener either now or later. To set up the HTTPS listener later, make sure the above records are added to your DNS registrar/service, then monitor the status of your requested certificate at https://console.aws.amazon.com/acm/home. Once the certificate has status 'Issued', run:\n")
+    print("judgment self-host https-listener\n")
+    print("to set up the HTTPS listener.\n")
     
-    print("After adding these records, monitor the status of your requested certificate at https://console.aws.amazon.com/acm/home. Once the certificate has status 'Issued', run:")
-    print("judgment self-host https-listener")
+    if not typer.confirm("Would you like to continue with the HTTPS listener setup right now?"):
+        print("\nThis program will now terminate without setting up the HTTPS listener...\n")
+        raise typer.Exit(0)
+
+    print("\nProceeding with HTTPS listener setup...")
+    print("Once the two records have been added to your DNS registrar/service, the ACM certificate should be validated and issued shortly after. This program will then continue with the HTTPS listener setup...")
+    print("\nChecking ACM certificate status every 30 seconds... You can safely terminate this program during this phase if necessary.")
+    acm_client = boto3.client('acm')
+    judgment_certificate_arn = subprocess.check_output(['terraform', 'output', '-raw', 'judgment_certificate_arn']).decode('utf-8').strip()
+    while not is_certificate_issued(judgment_certificate_arn, acm_client):
+        time.sleep(30)
+    print("\nACM certificate issued! Proceeding with HTTPS listener setup...")
+    create_https_listener()
 
 def create_https_listener():
     """
@@ -108,5 +134,19 @@ def create_https_listener():
     print("You should now be able to access your self-hosted Judgment server at:")
     print(f"https://{domain_name}")
     
+def is_certificate_issued(certificate_arn: str, acm_client: boto3.client):
+    """
+    Get the status of the ACM certificate for the given domain name.
+    """
+    # Get certificate details
+    response = acm_client.describe_certificate(CertificateArn=certificate_arn)
+    status = response['Certificate']['Status']
 
+    # Check if the certificate has been issued
+    if status == 'ISSUED':
+        print(f"Checking ACM certificate status at {datetime.datetime.now()}: Certificate has been issued.")
+        return True
+    else:
+        print(f"Checking ACM certificate status at {datetime.datetime.now()}: Certificate status is: {status}")
+        return False
     
