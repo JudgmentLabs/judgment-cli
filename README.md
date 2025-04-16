@@ -30,7 +30,7 @@ To see usage information, run:
 judgment self-host --help
 ```
 
-#### Prerequisites
+#### --- Prerequisites ---
 
 **First, make sure AWS CLI is installed and configured.**
 
@@ -70,7 +70,7 @@ Instructions [here](https://developer.hashicorp.com/terraform/tutorials/aws-get-
 
 **Third, make sure you have access to a [Supabase account and organization](https://supabase.com/dashboard/sign-in?returnTo=%2Fprojects). This command will automatically create and configure a new Supabase project in this organization.**
 
-#### Deploying
+#### --- Deploying ---
 
 To deploy a self-hosted instance of Judgment:
 
@@ -112,7 +112,8 @@ This command will:
 
 
 
-#### Setting up the HTTPS listener (optional, you can choose to have this done as part of the main self-host command)
+#### --- Setting up the HTTPS listener ---
+**NOTE: This step is optional; you can choose to have this done as part of the main self-host command.**
 
 **WARNING: This command will only work after `judgment self-host main` has already been run AND the ACM certificate has been issued. To accomplish this, the two records returned by the main self-host command must be added to your DNS registrar/service, and you must monitor the ACM console [here](https://console.aws.amazon.com/acm/home) until the certificate has status 'Issued' before running this command.**
 
