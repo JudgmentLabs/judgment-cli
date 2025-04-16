@@ -70,8 +70,8 @@ def self_host(
     try:
         with open(creds_file, 'r') as f:
             creds = json.load(f)
-    except json.JSONDecodeError:
-        typer.echo("Error: Invalid JSON in credentials file", err=True)
+    except json.JSONDecodeError as e:
+        typer.echo(f"Error: Invalid JSON in credentials file: {e}", err=True)
         raise typer.Exit(1)
     
     # Validate required credentials
