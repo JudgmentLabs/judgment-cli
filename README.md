@@ -88,14 +88,40 @@ To deploy a self-hosted instance of Judgment:
 }
 ```
 
-2. Run the self-host command with the appropriate arguments. For example:
+2. Run the main self-host command with the appropriate arguments. For example:
 ```bash
-judgment self-host --root-judgment-email root@judgment.com --root-judgment-password password --creds-file creds.json --supabase-compute-size nano
+judgment self-host main \
+--root-judgment-email root@example.com \
+--root-judgment-password password \
+--domain-name api.example.com \
+--creds-file creds.json \
+--supabase-compute-size nano
 ```
 *Keep in mind that for `--supabase-compute-size`, only "nano" is available on the free tier of Supabase. If you want to use a larger size, you will need to upgrade your organization to a paid plan.*
 
 This command will:
 1. Create a new Supabase project
-2. Deploy the Judgment AWS infrastructure using Terraform
-3. Configure the AWS infrastructure to communicate with the new Supabase database
-4. Create a root Judgment user in the self-hosted environment with the email and password provided
+2. Create a root Judgment user in the self-hosted environment with the email and password provided
+3. Deploy the Judgment AWS infrastructure using Terraform
+4. Configure the AWS infrastructure to communicate with the new Supabase database
+5. \* Request an SSL certificate from AWS Certificate Manager for the domain name provided
+6. ** (Optional) Wait for the certificate to be issued and then set up the HTTPS listener
+
+\* For the certificate to be issued, this command will return two DNS records that must be manually added to your DNS registrar/service.
+** You will be prompted to either continue with the HTTPS listener setup now or to come back later. If you choose to proceed with the setup now, the program will wait for the certificate to be issued before continuing. If you choose to come back later, refer to the section below for a dedicated HTTPS listener setup command.
+
+
+
+#### Setting up the HTTPS listener (optional, you can choose to have this done as part of the main self-host command)
+
+**WARNING: This command will only work after `judgment self-host main` has already been run AND the ACM certificate has been issued. To accomplish this, the two records returned by the main self-host command must be added to your DNS registrar/service, and you must monitor the ACM console [here](https://console.aws.amazon.com/acm/home) until the certificate has status 'Issued' before running this command.**
+
+To set up the HTTPS listener, run:
+```bash
+judgment self-host https-listener
+```
+
+This command will:
+1. Set up the HTTPS listener with the certificate issued by AWS Certificate Manager
+2. Return the url to the HTTPS-enabled domain which now points to your self-hosted Judgment server
+
