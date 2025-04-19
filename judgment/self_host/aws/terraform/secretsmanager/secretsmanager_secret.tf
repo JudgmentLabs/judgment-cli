@@ -28,6 +28,7 @@ resource "aws_secretsmanager_secret_version" "prod_api_keys_misc_version" {
     LANGFUSE_HOST = "https://us.cloud.langfuse.com"
     LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
     LANGFUSE_SECRET_KEY = var.langfuse_secret_key
+    SELF_HOSTED="true"
   })
 }
 
