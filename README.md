@@ -36,7 +36,10 @@ judgment self-host https-listener --help
 
 #### --- Prerequisites ---
 
-**First, make sure AWS CLI is installed and configured.**
+
+**First, make sure you have an empty AWS account that has been registered with us for self-hosting, AND that we have sent you an Osiris API key to use for your self-hosted Judgment instance (if you are planning to use Osiris for evaluations).**
+
+**Second, make sure AWS CLI is installed and configured with the AWS account mentioned in the first step.**
 
 On Mac:
 ```bash
@@ -51,12 +54,12 @@ On Linux:
 sudo apt install awscli
 ```
 
-*An empty/new AWS account is required to deploy the infrastructure. After one has been created, configure your local environment with the relevant AWS credentials by running the following command:*
+Configure your local environment with the relevant AWS credentials by running the following command:
 ```bash
 aws configure
 ```
 
-**Second, make sure Terraform CLI is installed.**
+**Third, make sure Terraform CLI is installed.**
 
 On Mac:
 ```bash
@@ -72,7 +75,7 @@ choco install terraform
 On Linux:
 Instructions [here](https://developer.hashicorp.com/terraform/tutorials/aws-get-started/install-cli)
 
-**Third, make sure you have access to a [Supabase account and organization](https://supabase.com/dashboard/sign-in?returnTo=%2Fprojects). This command will automatically create and configure a new Supabase project in this organization.**
+**Fourth, make sure you have access to a [Supabase account and organization](https://supabase.com/dashboard/sign-in?returnTo=%2Fprojects). This command will automatically create and configure a new Supabase project in this organization.**
 
 #### --- Deploying ---
 
@@ -84,13 +87,14 @@ To deploy a self-hosted instance of Judgment:
     "supabase_token": "your_supabase_personal_access_token_here",
     "org_id": "your_supabase_organization_id_here",
     "db_password": "your_desired_supabase_database_password_here",
-    "langfuse_public_key": "your_langfuse_public_key_here",
-    "langfuse_secret_key": "your_langfuse_secret_key_here",
-    "openai_api_key": "your_openai_api_key_here",
-    "togetherai_api_key": "your_togetherai_api_key_here",
-    "anthropic_api_key": "your_anthropic_api_key_here"
+    "osiris_api_key": "your_osiris_api_key_here (optional)",
+    "openai_api_key": "your_openai_api_key_here (optional)",
+    "togetherai_api_key": "your_togetherai_api_key_here (optional)",
+    "anthropic_api_key": "your_anthropic_api_key_here (optional)"
 }
 ```
+
+*Note: The four LLM API keys are optional. If you are not planning to run evaluations with the models that require any of these API keys, you do not need to specify them.*
 
 2. Run the main self-host command with the appropriate arguments. For example:
 ```bash

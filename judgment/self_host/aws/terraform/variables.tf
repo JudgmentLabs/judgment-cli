@@ -18,14 +18,6 @@ variable "supabase_project_id" {
   type = string
 }
 
-variable "langfuse_public_key" {
-  type = string
-}
-
-variable "langfuse_secret_key" {
-  type = string
-}
-
 variable "openai_api_key" {
   type = string
 }

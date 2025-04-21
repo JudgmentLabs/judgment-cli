@@ -25,9 +25,6 @@ resource "aws_secretsmanager_secret_version" "prod_api_keys_misc_version" {
     CUSTOM_MODEL_OUTPUT_TOKEN_COST = 0.00001
     LITELLM_LOG = "DEBUG"
     "TEST!" = "hehetesttest"
-    LANGFUSE_HOST = "https://us.cloud.langfuse.com"
-    LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
-    LANGFUSE_SECRET_KEY = var.langfuse_secret_key
     SELF_HOSTED="true"
     BACKEND_OSIRIS_API_KEY = var.backend_osiris_api_key
   })

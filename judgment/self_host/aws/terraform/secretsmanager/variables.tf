@@ -30,14 +30,6 @@ variable "rabbitmq_broker_id" {
   type = string
 }
 
-variable "langfuse_public_key" {
-  type = string
-}
-
-variable "langfuse_secret_key" {
-  type = string
-}
-
 variable "judgment_lb_dns_name" {
   type = string
 }

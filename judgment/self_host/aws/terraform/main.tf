@@ -53,8 +53,6 @@ module secretsmanager {
   rabbitmq_broker_name = module.mq.aws_mq_broker_rabbitmq-judgment_name
   rabbitmq_broker_id = module.mq.aws_mq_broker_rabbitmq-judgment_id
   judgment_lb_dns_name = module.alb.judgment_lb_dns_name
-  langfuse_public_key = var.langfuse_public_key
-  langfuse_secret_key = var.langfuse_secret_key
   openai_api_key = var.openai_api_key
   togetherai_api_key = var.togetherai_api_key
   anthropic_api_key = var.anthropic_api_key

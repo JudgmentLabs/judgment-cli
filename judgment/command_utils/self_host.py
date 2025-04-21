@@ -6,7 +6,7 @@ import time
 import datetime
 from ..self_host.supabase.supabase import SupabaseClient
 
-def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, root_judgment_password: str, domain_name: str, backend_osiris_api_key: str):
+def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, root_judgment_password: str, domain_name: str):
     """Deploy a self-hosted instance of Judgment."""
     supabase_token = creds["supabase_token"]
     org_id = creds["org_id"]
@@ -32,13 +32,11 @@ def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, ro
         f'-var="supabase_service_role_key={supabase_secrets["supabase_service_role_key"]}" '
         f'-var="supabase_jwt_secret={supabase_secrets["supabase_jwt_secret"]}" '
         f'-var="supabase_project_id={supabase_secrets["supabase_project_id"]}" '
-        f'-var="langfuse_public_key={creds["langfuse_public_key"]}" '
-        f'-var="langfuse_secret_key={creds["langfuse_secret_key"]}" '
-        f'-var="openai_api_key={creds["openai_api_key"]}" '
-        f'-var="togetherai_api_key={creds["togetherai_api_key"]}" '
-        f'-var="anthropic_api_key={creds["anthropic_api_key"]}" '
+        f'-var="openai_api_key={creds.get("openai_api_key", "")}" '
+        f'-var="togetherai_api_key={creds.get("togetherai_api_key", "")}" '
+        f'-var="anthropic_api_key={creds.get("anthropic_api_key", "")}" '
+        f'-var="backend_osiris_api_key={creds.get("osiris_api_key", "")}" '
         f'-var="domain_name={domain_name}" '
-        f'-var="backend_osiris_api_key={backend_osiris_api_key}" '
         f'-auto-approve'
     )
     

@@ -29,11 +29,6 @@ class ComputeSize(str, Enum):
 
 @self_host_app.command(name="main")
 def self_host(
-    backend_osiris_api_key: Annotated[str, typer.Option(
-        "--backend-osiris-api-key",
-        "-k",
-        help="Assigned API key for Osiris model access"
-    )],
     root_judgment_email: Annotated[str, typer.Option(
         "--root-judgment-email",
         "-e",
@@ -80,11 +75,25 @@ def self_host(
         raise typer.Exit(1)
     
     # Validate required credentials
-    required_fields = ['supabase_token', 'org_id', 'db_password', 'langfuse_public_key', 'langfuse_secret_key', 'openai_api_key', 'togetherai_api_key', 'anthropic_api_key']
-    missing_fields = [field for field in required_fields if field not in creds]
-    if missing_fields:
-        typer.echo(f"Error: Missing required fields in credentials file: {', '.join(missing_fields)}", err=True)
+    required_fields = ['supabase_token', 'org_id', 'db_password']
+    optional_api_keys = ['osiris_api_key', 'openai_api_key', 'togetherai_api_key', 'anthropic_api_key']
+    
+    missing_required = [field for field in required_fields if field not in creds or not creds[field]]
+    if missing_required:
+        typer.echo(f"Error: Missing required credentials: {', '.join(missing_required)}", err=True)
         raise typer.Exit(1)
+    
+    # Check for missing optional API keys
+    missing_api_keys = [key for key in optional_api_keys if key not in creds or not creds[key]]
+    if missing_api_keys:
+        typer.echo("\nWarning: The following API key(s) is/are not specified:")
+        for key in missing_api_keys:
+            typer.echo(f"- {key}")
+        typer.echo("\nYou won't be able to run evaluations with the models that require these API keys.")
+        typer.echo("You can add them later by updating the secrets in AWS Secrets Manager.")
+        if not typer.confirm("Do you want to continue anyway?"):
+            typer.echo("Deployment cancelled.")
+            raise typer.Exit(0)
     
     # Get Supabase organization information
     try:
@@ -147,7 +156,7 @@ def self_host(
     
     # Run the deployment
     try:
-        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name, backend_osiris_api_key)
+        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name)
     except Exception as e:
         typer.echo(f"Error during deployment: {str(e)}", err=True)
         raise typer.Exit(1)
