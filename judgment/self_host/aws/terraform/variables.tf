@@ -41,3 +41,7 @@ variable "anthropic_api_key" {
 variable "domain_name" {
   type = string
 }
+
+variable "backend_osiris_api_key" {
+  type = string
+}

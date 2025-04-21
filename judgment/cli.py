@@ -29,6 +29,11 @@ class ComputeSize(str, Enum):
 
 @self_host_app.command(name="main")
 def self_host(
+    backend_osiris_api_key: Annotated[str, typer.Option(
+        "--backend-osiris-api-key",
+        "-k",
+        help="Assigned API key for Osiris model access"
+    )],
     root_judgment_email: Annotated[str, typer.Option(
         "--root-judgment-email",
         "-e",
@@ -142,7 +147,7 @@ def self_host(
     
     # Run the deployment
     try:
-        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name)
+        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name, backend_osiris_api_key)
     except Exception as e:
         typer.echo(f"Error during deployment: {str(e)}", err=True)
         raise typer.Exit(1)

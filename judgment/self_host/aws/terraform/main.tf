@@ -58,6 +58,7 @@ module secretsmanager {
   openai_api_key = var.openai_api_key
   togetherai_api_key = var.togetherai_api_key
   anthropic_api_key = var.anthropic_api_key
+  backend_osiris_api_key = var.backend_osiris_api_key
 }
 
 module sg {

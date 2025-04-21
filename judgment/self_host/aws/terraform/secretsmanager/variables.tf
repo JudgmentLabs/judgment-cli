@@ -53,3 +53,7 @@ variable "togetherai_api_key" {
 variable "anthropic_api_key" {
   type = string
 }
+
+variable "backend_osiris_api_key" {
+  type = string
+}

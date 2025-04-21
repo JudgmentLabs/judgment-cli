@@ -29,6 +29,7 @@ resource "aws_secretsmanager_secret_version" "prod_api_keys_misc_version" {
     LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
     LANGFUSE_SECRET_KEY = var.langfuse_secret_key
     SELF_HOSTED="true"
+    BACKEND_OSIRIS_API_KEY = var.backend_osiris_api_key
   })
 }
 
