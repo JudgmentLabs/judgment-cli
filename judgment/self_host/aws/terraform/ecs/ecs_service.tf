@@ -59,10 +59,6 @@ resource "aws_appautoscaling_policy" "backend_scale_policy" {
 resource "aws_ecs_service" "JudgmentWebSocketServer" {
   cluster = var.cluster_name
 
-  deployment_controller {
-    type = "CODE_DEPLOY"
-  }
-
   deployment_maximum_percent         = "200"
   deployment_minimum_healthy_percent = "100"
   desired_count                      = "2"
