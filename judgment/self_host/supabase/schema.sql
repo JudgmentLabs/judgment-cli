@@ -374,47 +374,89 @@ $$;
 ALTER FUNCTION "public"."get_auth_users"("user_ids" "uuid"[]) OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_dataset_stats"("input_dataset_id" "uuid") RETURNS TABLE("created_at" timestamp with time zone, "updated_at" timestamp with time zone, "example_count" integer)
+CREATE OR REPLACE FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) RETURNS TABLE("dataset_alias" "text")
+    LANGUAGE "sql"
+    AS $$
+    select d.dataset_alias
+    from datasets d
+    join project_datasets pd on d.dataset_id = pd.dataset_id
+    where pd.project_id = input_project_id
+      and d.is_sequence = input_is_sequence;
+$$;
+
+
+ALTER FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_dataset_sequence"("input_project_id" "uuid", "input_dataset_alias" "text", "input_root_sequence_id" "uuid") RETURNS SETOF "record"
+    LANGUAGE "sql"
+    AS $$
+    select 
+        s.*,
+        e.*
+    from project_datasets pd
+    join datasets d on d.dataset_id = pd.dataset_id
+    join sequences s on s.dataset_id = d.dataset_id
+    left join examples e on s.sequence_id = e.sequence_id
+    where
+        pd.project_id = input_project_id and
+        d.dataset_alias = input_dataset_alias and
+        s.root_sequence_id = input_root_sequence_id
+    order by s.sequence_order, e.sequence_order;
+$$;
+
+
+ALTER FUNCTION "public"."get_dataset_sequence"("input_project_id" "uuid", "input_dataset_alias" "text", "input_root_sequence_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_dataset_stats"("input_dataset_id" "uuid") RETURNS TABLE("created_at" timestamp with time zone, "updated_at" timestamp with time zone, "example_count" integer, "sequence_count" integer, "is_sequence" boolean)
     LANGUAGE "plpgsql"
     AS $$BEGIN
     RETURN QUERY
     SELECT
         MIN(d.created_at) AS created_at,
-        MAX(e.created_at) AS updated_at,
-        COUNT(e.example_id)::INTEGER AS example_count
+        GREATEST(MAX(e.created_at), MIN(d.created_at)) AS updated_at,
+        COUNT(DISTINCT e.example_id)::INTEGER AS example_count,
+        COUNT(DISTINCT s.root_sequence_id)::INTEGER as sequence_count,
+        BOOL_OR(d.is_sequence) AS is_sequence
     FROM 
         datasets d
     LEFT JOIN 
         examples e ON d.dataset_id = e.dataset_id
-    WHERE 
-        d.dataset_id = input_dataset_id
-    LIMIT 1;
+    LEFT JOIN 
+        sequences s ON d.dataset_id = s.dataset_id
+    WHERE
+        d.dataset_id = input_dataset_id;
 END;$$;
 
 
 ALTER FUNCTION "public"."get_dataset_stats"("input_dataset_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_dataset_stats_by_project"("input_project_id" "uuid") RETURNS TABLE("dataset_alias" "text", "created_at" timestamp with time zone, "updated_at" timestamp with time zone, "example_count" integer)
+CREATE OR REPLACE FUNCTION "public"."get_dataset_stats_by_project"("input_project_id" "uuid") RETURNS TABLE("dataset_alias" "text", "created_at" timestamp with time zone, "updated_at" timestamp with time zone, "example_count" integer, "sequence_count" integer, "is_sequence" boolean)
     LANGUAGE "plpgsql"
     AS $$
 BEGIN
     RETURN QUERY
     SELECT
-        d.dataset_alias,
+        d.dataset_alias AS dataset_alias,
         MIN(d.created_at) AS created_at,
-        MAX(e.created_at) AS updated_at,
-        COUNT(e.example_id)::INTEGER AS example_count
+        GREATEST(MAX(e.created_at), MIN(d.created_at)) AS updated_at,
+        COUNT(DISTINCT e.example_id)::INTEGER AS example_count,
+        COUNT(DISTINCT s.root_sequence_id)::INTEGER as sequence_count,
+        BOOL_OR(d.is_sequence) AS is_sequence
     FROM 
         project_datasets pd
     JOIN 
         datasets d ON pd.dataset_id = d.dataset_id
     LEFT JOIN 
         examples e ON d.dataset_id = e.dataset_id
+    LEFT JOIN 
+        sequences s ON d.dataset_id = s.dataset_id
     WHERE 
         pd.project_id = input_project_id
     GROUP BY 
-        d.dataset_alias;
+        d.dataset_alias, d.dataset_id;
 END;
 $$;
 
@@ -486,6 +528,36 @@ $$;
 ALTER FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid") RETURNS TABLE("eval_result_run" "text")
+    LANGUAGE "sql"
+    AS $$
+    select eval_result_run
+    from eval_results
+    where project_id = project
+    group by eval_result_run
+    order by max(created_at) desc
+    limit 10;
+$$;
+
+
+ALTER FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "run_limit" integer) RETURNS TABLE("eval_result_run" "text")
+    LANGUAGE "sql"
+    AS $$
+    select eval_result_run
+    from eval_results
+    where project_id = project
+    group by eval_result_run
+    order by max(created_at) desc
+    limit run_limit;
+$$;
+
+
+ALTER FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "run_limit" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_organization_members"("org_id" "uuid") RETURNS TABLE("user_id" "uuid", "email" "text", "first_name" "text", "last_name" "text", "role" "text", "created_at" timestamp with time zone)
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -539,7 +611,7 @@ CREATE OR REPLACE FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" 
         p.project_name,
         u.first_name,
         u.last_name,
-        COALESCE(GREATEST(MAX(er.completed_at), MAX(t.created_at)), p.created_at) AS updated_at,-- Use GREATEST to get the maximum timestamp from
+        COALESCE(GREATEST(MAX(er.created_at), MAX(t.created_at)), p.created_at) AS updated_at,-- Use GREATEST to get the maximum timestamp from
         COUNT(DISTINCT er.eval_result_run)::INTEGER AS total_eval_runs,
         COUNT(DISTINCT t.trace_id)::INTEGER AS total_traces
     FROM 
@@ -558,6 +630,25 @@ END;$$;
 
 
 ALTER FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") RETURNS TABLE("root_sequence_id" "uuid", "root_sequence_name" "text", "latest_created_at" timestamp with time zone)
+    LANGUAGE "sql"
+    AS $$
+    select 
+        s.root_sequence_id,
+        max(case when s.sequence_id = s.root_sequence_id then s.name end) as root_sequence_name,
+        max(s.created_at) as latest_created_at
+    from 
+        sequences s
+    where 
+        s.dataset_id = input_dataset_id
+    group by 
+        s.root_sequence_id
+$$;
+
+
+ALTER FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_slack_team_ids_for_user"("user_uuid" "uuid") RETURNS TABLE("team_id" "text")
@@ -914,6 +1005,32 @@ $$;
 
 ALTER FUNCTION "public"."log_debug"("message" "text") OWNER TO "postgres";
 
+
+CREATE OR REPLACE FUNCTION "public"."new_get_latest_eval_results"("project_id" "uuid", "max_experiments" integer) RETURNS TABLE("eval_result_run" "text", "eval_result" "jsonb", "user_data" "jsonb", "examples" "jsonb")
+    LANGUAGE "sql" STABLE
+    AS $_$WITH latest_experiments AS (
+    SELECT 
+      eval_result_run,
+      MAX(created_at) AS experiment_created_at
+    FROM eval_results
+    WHERE project_id = $1
+    GROUP BY eval_result_run
+    ORDER BY MAX(created_at) DESC
+    LIMIT $2
+  )
+  SELECT
+    er.eval_result_run,
+    to_jsonb(er) AS eval_result, -- All columns from eval_results
+    to_jsonb(ud) AS user_data,   -- All columns from user_data
+    (SELECT jsonb_agg(to_jsonb(ex)) FROM examples ex WHERE ex.eval_results_id = er.id) AS examples
+  FROM eval_results er
+  LEFT JOIN user_data ud ON ud.id = er.user_id -- Replace "user_id" with your actual FK column
+  WHERE er.eval_result_run IN (SELECT eval_result_run FROM latest_experiments)
+  ORDER BY er.eval_result_run, er.created_at DESC;$_$;
+
+
+ALTER FUNCTION "public"."new_get_latest_eval_results"("project_id" "uuid", "max_experiments" integer) OWNER TO "postgres";
+
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
@@ -925,7 +1042,8 @@ CREATE TABLE IF NOT EXISTS "public"."datasets" (
     "dataset_alias" "text" NOT NULL,
     "comments" "text",
     "source_file" "text",
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "is_sequence" boolean DEFAULT false NOT NULL
 );
 
 
@@ -1013,9 +1131,6 @@ CREATE TABLE IF NOT EXISTS "public"."examples" (
     "created_at" timestamp with time zone DEFAULT ("now"() AT TIME ZONE 'utc'::"text"),
     "dataset_id" "uuid",
     "eval_results_id" "uuid",
-    "eval_result_run" "text",
-    "eval_result_index" smallint,
-    "project_id" "uuid" DEFAULT "gen_random_uuid"(),
     "sequence_id" "uuid",
     "sequence_order" integer
 );
@@ -1435,6 +1550,20 @@ CREATE TABLE IF NOT EXISTS "public"."alerts" (
 ALTER TABLE "public"."alerts" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."annotation_queue" (
+    "queue_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "trace_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "span_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "status" "text" DEFAULT 'pending'::"text",
+    "name" "text"
+);
+
+
+ALTER TABLE "public"."annotation_queue" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."api_key_to_id" (
     "api_key" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL
@@ -1455,7 +1584,9 @@ CREATE TABLE IF NOT EXISTS "public"."custom_scorers" (
     "options" "jsonb",
     "user_id" "uuid" DEFAULT "gen_random_uuid"(),
     "slug" "text",
-    "organization_id" "uuid"
+    "organization_id" "uuid",
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_at" timestamp with time zone DEFAULT "now"()
 );
 
 
@@ -1470,7 +1601,7 @@ CREATE TABLE IF NOT EXISTS "public"."eval_results" (
     "id" "uuid" NOT NULL,
     "user_id" "uuid" NOT NULL,
     "eval_result_run" "text" NOT NULL,
-    "eval_result_index" integer NOT NULL,
+    "eval_result_index" integer,
     "result" "jsonb" NOT NULL,
     "trace_id" "uuid",
     "created_at" timestamp with time zone,
@@ -1493,6 +1624,27 @@ COMMENT ON COLUMN "public"."eval_results"."created_at" IS 'When the eval run ent
 
 COMMENT ON COLUMN "public"."eval_results"."completed_at" IS 'When the eval_run are completed';
 
+
+
+CREATE TABLE IF NOT EXISTS "public"."eval_scorer_data" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "eval_result_id" "uuid" NOT NULL,
+    "scorer_name" "text",
+    "error" "text",
+    "score" real,
+    "reason" "text",
+    "success" boolean,
+    "threshold" real,
+    "strict_mode" boolean,
+    "verbose_logs" "text",
+    "evaluation_cost" real,
+    "evaluation_model" "text",
+    "additional_metadata" "text"
+);
+
+
+ALTER TABLE "public"."eval_scorer_data" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."invitations" (
@@ -1641,14 +1793,40 @@ CREATE TABLE IF NOT EXISTS "public"."scheduled_reports" (
 ALTER TABLE "public"."scheduled_reports" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."self_hosted_endpoints" (
+    "url" character varying NOT NULL,
+    "custom_data" "json",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "aws_id" "uuid" DEFAULT "gen_random_uuid"(),
+    "osiris_api_key" "uuid" DEFAULT "gen_random_uuid"()
+);
+
+
+ALTER TABLE "public"."self_hosted_endpoints" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."sequence_roots" (
+    "root_sequence_id" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "dataset_id" "uuid",
+    "eval_result_id" "uuid"
+);
+
+
+ALTER TABLE "public"."sequence_roots" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."sequences" (
     "sequence_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "name" "text" DEFAULT ''::"text",
-    "parent_sequence_id" "uuid",
-    "eval_results_id" "uuid",
     "dataset_id" "uuid",
-    "sequence_order" integer
+    "sequence_order" integer,
+    "eval_results_id" "uuid",
+    "parent_sequence_id" "uuid",
+    "inputs" "text",
+    "output" "text",
+    "root_sequence_id" "uuid" NOT NULL
 );
 
 
@@ -1717,9 +1895,9 @@ CREATE TABLE IF NOT EXISTS "public"."traces" (
     "user_id" "uuid" NOT NULL,
     "duration" double precision NOT NULL,
     "token_counts" "jsonb",
-    "entries" "jsonb" NOT NULL,
     "project_id" "uuid" NOT NULL,
-    "has_notification" boolean DEFAULT false
+    "has_notification" boolean DEFAULT false,
+    "entries" "jsonb"
 );
 
 
@@ -1826,6 +2004,11 @@ ALTER TABLE ONLY "public"."alerts"
 
 
 
+ALTER TABLE ONLY "public"."annotation_queue"
+    ADD CONSTRAINT "annotation_queue_pkey" PRIMARY KEY ("queue_id");
+
+
+
 ALTER TABLE ONLY "public"."api_key_to_id"
     ADD CONSTRAINT "api_key_to_id_id_key" UNIQUE ("id");
 
@@ -1848,6 +2031,11 @@ ALTER TABLE ONLY "public"."datasets"
 
 ALTER TABLE ONLY "public"."eval_results"
     ADD CONSTRAINT "eval_results_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."eval_scorer_data"
+    ADD CONSTRAINT "eval_scorer_data_pkey" PRIMARY KEY ("id");
 
 
 
@@ -1903,6 +2091,16 @@ ALTER TABLE ONLY "public"."request_logs"
 
 ALTER TABLE ONLY "public"."scheduled_reports"
     ADD CONSTRAINT "scheduled_reports_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."self_hosted_endpoints"
+    ADD CONSTRAINT "self_hosted_endpoints_pkey" PRIMARY KEY ("url");
+
+
+
+ALTER TABLE ONLY "public"."sequence_roots"
+    ADD CONSTRAINT "sequence_roots_pkey" PRIMARY KEY ("root_sequence_id");
 
 
 
@@ -2036,6 +2234,11 @@ CREATE OR REPLACE TRIGGER "on_user_registration" AFTER INSERT ON "auth"."users" 
 
 
 ALTER TABLE ONLY "public"."alerts"
+    ADD CONSTRAINT "alerts_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("project_id");
+
+
+
+ALTER TABLE ONLY "public"."alerts"
     ADD CONSTRAINT "alerts_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id");
 
 
@@ -2067,6 +2270,11 @@ ALTER TABLE ONLY "public"."eval_results"
 
 ALTER TABLE ONLY "public"."eval_results"
     ADD CONSTRAINT "eval_results_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user_data"("id") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."eval_scorer_data"
+    ADD CONSTRAINT "eval_scorer_data_eval_result_id_fkey" FOREIGN KEY ("eval_result_id") REFERENCES "public"."eval_results"("id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 
@@ -2115,6 +2323,11 @@ ALTER TABLE ONLY "public"."projects"
 
 
 
+ALTER TABLE ONLY "public"."sequence_roots"
+    ADD CONSTRAINT "sequence_roots_dataset_id_fkey" FOREIGN KEY ("dataset_id") REFERENCES "public"."datasets"("dataset_id") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."sequences"
     ADD CONSTRAINT "sequences_dataset_id_fkey" FOREIGN KEY ("dataset_id") REFERENCES "public"."datasets"("dataset_id") ON UPDATE CASCADE ON DELETE CASCADE;
 
@@ -2155,29 +2368,27 @@ ALTER TABLE ONLY "public"."user_organizations"
 
 
 
-CREATE POLICY "Users can delete records from their organization" ON "public"."custom_scorers" FOR DELETE USING ((("auth"."uid"() IS NOT NULL) AND ("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+CREATE POLICY "Users can delete custom_scorers in their orgs" ON "public"."custom_scorers" FOR DELETE USING ((EXISTS ( SELECT 1
    FROM "public"."user_organizations"
-  WHERE (("user_organizations"."user_id" = "auth"."uid"()) AND ("user_organizations"."organization_id" = "custom_scorers"."organization_id"))))));
+  WHERE (("user_organizations"."user_id" = "auth"."uid"()) AND ("user_organizations"."organization_id" = "custom_scorers"."organization_id")))));
 
 
 
-CREATE POLICY "Users can insert into their organization" ON "public"."custom_scorers" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+CREATE POLICY "Users can insert custom_scorers into their orgs" ON "public"."custom_scorers" FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
    FROM "public"."user_organizations"
-  WHERE (("user_organizations"."user_id" = "auth"."uid"()) AND ("user_organizations"."organization_id" = "custom_scorers"."organization_id"))))));
+  WHERE (("user_organizations"."user_id" = "auth"."uid"()) AND ("user_organizations"."organization_id" = "custom_scorers"."organization_id")))));
 
 
 
-CREATE POLICY "Users can update their own custom scorers within organization" ON "public"."custom_scorers" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND ("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+CREATE POLICY "Users can select custom_scorers in their orgs" ON "public"."custom_scorers" FOR SELECT USING ((EXISTS ( SELECT 1
    FROM "public"."user_organizations"
-  WHERE (("user_organizations"."user_id" = "auth"."uid"()) AND ("user_organizations"."organization_id" = "custom_scorers"."organization_id")))))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND ("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+  WHERE (("user_organizations"."user_id" = "auth"."uid"()) AND ("user_organizations"."organization_id" = "custom_scorers"."organization_id")))));
+
+
+
+CREATE POLICY "Users can update custom_scorers in their orgs" ON "public"."custom_scorers" FOR UPDATE USING ((EXISTS ( SELECT 1
    FROM "public"."user_organizations"
-  WHERE (("user_organizations"."user_id" = "auth"."uid"()) AND ("user_organizations"."organization_id" = "custom_scorers"."organization_id"))))));
-
-
-
-CREATE POLICY "Users can view their organization's scorers" ON "public"."custom_scorers" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
-   FROM "public"."user_organizations"
-  WHERE (("user_organizations"."user_id" = "auth"."uid"()) AND ("user_organizations"."organization_id" = "custom_scorers"."organization_id"))))));
+  WHERE (("user_organizations"."user_id" = "auth"."uid"()) AND ("user_organizations"."organization_id" = "custom_scorers"."organization_id")))));
 
 
 
@@ -2710,6 +2921,18 @@ GRANT ALL ON FUNCTION "public"."get_auth_users"("user_ids" "uuid"[]) TO "service
 
 
 
+GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_dataset_sequence"("input_project_id" "uuid", "input_dataset_alias" "text", "input_root_sequence_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_dataset_sequence"("input_project_id" "uuid", "input_dataset_alias" "text", "input_root_sequence_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_dataset_sequence"("input_project_id" "uuid", "input_dataset_alias" "text", "input_root_sequence_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_dataset_stats"("input_dataset_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_dataset_stats"("input_dataset_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_dataset_stats"("input_dataset_id" "uuid") TO "service_role";
@@ -2728,6 +2951,18 @@ GRANT ALL ON FUNCTION "public"."get_experiments_by_project"("input_project_id" "
 
 
 
+GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "run_limit" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "run_limit" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "run_limit" integer) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_organization_members"("org_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_organization_members"("org_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_organization_members"("org_id" "uuid") TO "service_role";
@@ -2743,6 +2978,12 @@ GRANT ALL ON FUNCTION "public"."get_project_id"("input_project_name" "text", "in
 GRANT ALL ON FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") TO "service_role";
 
 
 
@@ -2815,6 +3056,12 @@ GRANT ALL ON FUNCTION "public"."is_usage_based_enabled"("org_id" "uuid") TO "ser
 GRANT ALL ON FUNCTION "public"."log_debug"("message" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."log_debug"("message" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."log_debug"("message" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."new_get_latest_eval_results"("project_id" "uuid", "max_experiments" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."new_get_latest_eval_results"("project_id" "uuid", "max_experiments" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."new_get_latest_eval_results"("project_id" "uuid", "max_experiments" integer) TO "service_role";
 
 
 
@@ -2980,6 +3227,12 @@ GRANT ALL ON TABLE "public"."alerts" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."annotation_queue" TO "anon";
+GRANT ALL ON TABLE "public"."annotation_queue" TO "authenticated";
+GRANT ALL ON TABLE "public"."annotation_queue" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."api_key_to_id" TO "anon";
 GRANT ALL ON TABLE "public"."api_key_to_id" TO "authenticated";
 GRANT ALL ON TABLE "public"."api_key_to_id" TO "service_role";
@@ -2995,6 +3248,12 @@ GRANT ALL ON TABLE "public"."custom_scorers" TO "service_role";
 GRANT ALL ON TABLE "public"."eval_results" TO "anon";
 GRANT ALL ON TABLE "public"."eval_results" TO "authenticated";
 GRANT ALL ON TABLE "public"."eval_results" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."eval_scorer_data" TO "anon";
+GRANT ALL ON TABLE "public"."eval_scorer_data" TO "authenticated";
+GRANT ALL ON TABLE "public"."eval_scorer_data" TO "service_role";
 
 
 
@@ -3049,6 +3308,18 @@ GRANT ALL ON SEQUENCE "public"."request_logs_id_seq" TO "service_role";
 GRANT ALL ON TABLE "public"."scheduled_reports" TO "anon";
 GRANT ALL ON TABLE "public"."scheduled_reports" TO "authenticated";
 GRANT ALL ON TABLE "public"."scheduled_reports" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."self_hosted_endpoints" TO "anon";
+GRANT ALL ON TABLE "public"."self_hosted_endpoints" TO "authenticated";
+GRANT ALL ON TABLE "public"."self_hosted_endpoints" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."sequence_roots" TO "anon";
+GRANT ALL ON TABLE "public"."sequence_roots" TO "authenticated";
+GRANT ALL ON TABLE "public"."sequence_roots" TO "service_role";
 
 
 

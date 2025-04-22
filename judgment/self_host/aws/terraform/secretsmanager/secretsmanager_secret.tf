@@ -21,8 +21,8 @@ resource "aws_secretsmanager_secret_version" "prod_api_keys_misc_version" {
     FRONTEND_URL = "https://app.judgmentlabs.ai"
     BACKEND_URL = var.judgment_lb_dns_name
     PYTHON_PATH = "."
-    CUSTOM_MODEL_INPUT_TOKEN_COST = 0.0000025
-    CUSTOM_MODEL_OUTPUT_TOKEN_COST = 0.00001
+    CUSTOM_MODEL_INPUT_TOKEN_COST = "0.0000025"
+    CUSTOM_MODEL_OUTPUT_TOKEN_COST = "0.00001"
     LITELLM_LOG = "DEBUG"
     "TEST!" = "hehetesttest"
     SELF_HOSTED="true"
