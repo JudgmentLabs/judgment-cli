@@ -27,6 +27,9 @@ resource "aws_secretsmanager_secret_version" "prod_api_keys_misc_version" {
     "TEST!" = "hehetesttest"
     SELF_HOSTED="true"
     BACKEND_OSIRIS_API_KEY = var.backend_osiris_api_key
+    SMTP_EMAIL_ADDRESS = var.invitation_sender_email
+    SMTP_APP_PASSWORD = var.invitation_sender_app_password
+    EMAIL_SERVICE = var.invitation_email_service
   })
 }
 

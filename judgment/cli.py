@@ -27,6 +27,13 @@ class ComputeSize(str, Enum):
     twelve_xlarge = "12xlarge"
     sixteen_xlarge = "16xlarge"
 
+class EmailService(str, Enum):
+    gmail = "gmail"
+    outlook = "outlook"
+    yahoo = "yahoo"
+    zoho = "zoho"
+    fastmail = "fastmail"
+
 @self_host_app.command(name="main")
 def self_host(
     root_judgment_email: Annotated[str, typer.Option(
@@ -56,7 +63,12 @@ def self_host(
         "--supabase-compute-size",
         "-s",
         help="Size of the Supabase compute instance"
-    )] = "small"
+    )] = "small",
+    invitation_email_service: Annotated[EmailService, typer.Option(
+        "--invitation-email-service",
+        "-i",
+        help="Email service to use for sending organization invitations in the self-hosted environment"
+    )] = "gmail"
     ):
     """
     Deploy a self-hosted instance of Judgment (and optionally set up an HTTPS listener).
@@ -75,7 +87,7 @@ def self_host(
         raise typer.Exit(1)
     
     # Validate required credentials
-    required_fields = ['supabase_token', 'org_id', 'db_password']
+    required_fields = ['supabase_token', 'org_id', 'db_password', 'invitation_sender_email', 'invitation_sender_app_password']
     optional_api_keys = ['osiris_api_key', 'openai_api_key', 'togetherai_api_key', 'anthropic_api_key']
     
     missing_required = [field for field in required_fields if field not in creds or not creds[field]]
@@ -156,7 +168,7 @@ def self_host(
     
     # Run the deployment
     try:
-        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name)
+        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name, invitation_email_service)
     except Exception as e:
         typer.echo(f"Error during deployment: {str(e)}", err=True)
         raise typer.Exit(1)

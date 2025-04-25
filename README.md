@@ -87,6 +87,8 @@ To deploy a self-hosted instance of Judgment:
     "supabase_token": "your_supabase_personal_access_token_here",
     "org_id": "your_supabase_organization_id_here",
     "db_password": "your_desired_supabase_database_password_here",
+    "invitation_sender_email": "your_email_here",
+    "invitation_sender_app_password": "your_app_password_here",
     "osiris_api_key": "your_osiris_api_key_here (optional)",
     "openai_api_key": "your_openai_api_key_here (optional)",
     "togetherai_api_key": "your_togetherai_api_key_here (optional)",
@@ -103,7 +105,8 @@ judgment self-host main \
 --root-judgment-password password \
 --domain-name api.example.com \
 --creds-file creds.json \
---supabase-compute-size nano
+--supabase-compute-size nano \
+--invitation-email-service gmail
 ```
 *Keep in mind that for `--supabase-compute-size`, only "nano" is available on the free tier of Supabase. If you want to use a larger size, you will need to upgrade your organization to a paid plan.*
 

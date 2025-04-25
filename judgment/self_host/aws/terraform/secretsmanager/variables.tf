@@ -49,3 +49,16 @@ variable "anthropic_api_key" {
 variable "backend_osiris_api_key" {
   type = string
 }
+
+variable "invitation_sender_email" {
+  type = string
+}
+
+variable "invitation_sender_app_password" {
+  type = string
+}
+
+variable "invitation_email_service" {
+  type = string
+}
+

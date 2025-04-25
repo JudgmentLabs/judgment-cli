@@ -57,6 +57,9 @@ module secretsmanager {
   togetherai_api_key = var.togetherai_api_key
   anthropic_api_key = var.anthropic_api_key
   backend_osiris_api_key = var.backend_osiris_api_key
+  invitation_sender_email = var.invitation_sender_email
+  invitation_sender_app_password = var.invitation_sender_app_password
+  invitation_email_service = var.invitation_email_service
 }
 
 module sg {

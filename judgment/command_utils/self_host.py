@@ -6,7 +6,7 @@ import time
 import datetime
 from ..self_host.supabase.supabase import SupabaseClient
 
-def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, root_judgment_password: str, domain_name: str):
+def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, root_judgment_password: str, domain_name: str, invitation_email_service: str):
     """Deploy a self-hosted instance of Judgment."""
     supabase_token = creds["supabase_token"]
     org_id = creds["org_id"]
@@ -37,6 +37,9 @@ def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, ro
         f'-var="anthropic_api_key={creds.get("anthropic_api_key", "")}" '
         f'-var="backend_osiris_api_key={creds.get("osiris_api_key", "")}" '
         f'-var="domain_name={domain_name}" '
+        f'-var="invitation_sender_email={creds["invitation_sender_email"]}" '
+        f'-var="invitation_sender_app_password={creds["invitation_sender_app_password"]}" '
+        f'-var="invitation_email_service={invitation_email_service}" '
         f'-auto-approve'
     )
     
