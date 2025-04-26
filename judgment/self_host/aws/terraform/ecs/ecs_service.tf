@@ -49,7 +49,7 @@ resource "aws_appautoscaling_policy" "backend_scale_policy" {
     target_value = 4
     predefined_metric_specification {
       predefined_metric_type = "ALBRequestCountPerTarget"
-      resource_label        = "app/judgment/${split("/", var.judgment_lb_id)[2]}/targetgroup/judgment-target-group/${split("/", var.backend_target_group_id)[2]}"
+      resource_label        = "app/judgment/${split("/", var.judgment_lb_id)[3]}/targetgroup/judgment-target-group/${split("/", var.backend_target_group_id)[2]}"
     }
     scale_in_cooldown  = 60
     scale_out_cooldown = 60
@@ -106,7 +106,7 @@ resource "aws_appautoscaling_policy" "websocket_scale_policy" {
     target_value = 4
     predefined_metric_specification {
       predefined_metric_type = "ALBRequestCountPerTarget"
-      resource_label        = "app/judgment/${split("/", var.judgment_lb_id)[2]}/targetgroup/websocket-server-target-group-1/${split("/", var.websocket_target_group_id)[2]}"
+      resource_label        = "app/judgment/${split("/", var.judgment_lb_id)[3]}/targetgroup/websocket-server-target-group-1/${split("/", var.websocket_target_group_id)[2]}"
     }
     scale_in_cooldown  = 60
     scale_out_cooldown = 60
