@@ -3,7 +3,7 @@ resource "aws_ecs_service" "JudgmentBackendServer" {
 
   deployment_maximum_percent         = "200"
   deployment_minimum_healthy_percent = "100"
-  desired_count                      = "3"
+  desired_count                      = "1"
   enable_ecs_managed_tags            = "true"
   enable_execute_command             = "false"
   health_check_grace_period_seconds  = "0"
@@ -32,7 +32,7 @@ resource "aws_ecs_service" "JudgmentBackendServer" {
 # Backend Service Autoscaling
 resource "aws_appautoscaling_target" "backend_target" {
   max_capacity       = 10
-  min_capacity       = 2
+  min_capacity       = 1
   resource_id        = "service/${var.cluster_name}/${aws_ecs_service.JudgmentBackendServer.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
@@ -46,13 +46,13 @@ resource "aws_appautoscaling_policy" "backend_scale_policy" {
   service_namespace  = aws_appautoscaling_target.backend_target.service_namespace
 
   target_tracking_scaling_policy_configuration {
-    target_value = 0.5
+    target_value = 4
     predefined_metric_specification {
       predefined_metric_type = "ALBRequestCountPerTarget"
       resource_label        = "app/judgment/${split("/", var.judgment_lb_id)[2]}/targetgroup/judgment-target-group/${split("/", var.backend_target_group_id)[2]}"
     }
-    scale_in_cooldown  = 300
-    scale_out_cooldown = 120
+    scale_in_cooldown  = 60
+    scale_out_cooldown = 60
   }
 }
 
@@ -61,7 +61,7 @@ resource "aws_ecs_service" "JudgmentWebSocketServer" {
 
   deployment_maximum_percent         = "200"
   deployment_minimum_healthy_percent = "100"
-  desired_count                      = "2"
+  desired_count                      = "1"
   enable_ecs_managed_tags            = "true"
   enable_execute_command             = "false"
   health_check_grace_period_seconds  = "0"
@@ -89,7 +89,7 @@ resource "aws_ecs_service" "JudgmentWebSocketServer" {
 # WebSocket Service Autoscaling
 resource "aws_appautoscaling_target" "websocket_target" {
   max_capacity       = 10
-  min_capacity       = 2
+  min_capacity       = 1
   resource_id        = "service/${var.cluster_name}/${aws_ecs_service.JudgmentWebSocketServer.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
@@ -103,13 +103,13 @@ resource "aws_appautoscaling_policy" "websocket_scale_policy" {
   service_namespace  = aws_appautoscaling_target.websocket_target.service_namespace
 
   target_tracking_scaling_policy_configuration {
-    target_value = 0.5
+    target_value = 4
     predefined_metric_specification {
       predefined_metric_type = "ALBRequestCountPerTarget"
       resource_label        = "app/judgment/${split("/", var.judgment_lb_id)[2]}/targetgroup/websocket-server-target-group-1/${split("/", var.websocket_target_group_id)[2]}"
     }
-    scale_in_cooldown  = 300
-    scale_out_cooldown = 120
+    scale_in_cooldown  = 60
+    scale_out_cooldown = 60
   }
 }
 
@@ -167,7 +167,7 @@ resource "aws_appautoscaling_policy" "run_eval_worker_scale_policy" {
   service_namespace  = aws_appautoscaling_target.run_eval_worker_target.service_namespace
 
   target_tracking_scaling_policy_configuration {
-    target_value       = 50 # average messages count threshold
+    target_value       = 500 # average messages count threshold
     scale_in_cooldown  = 60
     scale_out_cooldown = 60
 
@@ -207,7 +207,7 @@ resource "aws_ecs_service" "TraceEvalWorker" {
 
   deployment_maximum_percent         = "200"
   deployment_minimum_healthy_percent = "100"
-  desired_count                      = "3"
+  desired_count                      = "0"
   enable_ecs_managed_tags            = "true"
   enable_execute_command             = "false"
   health_check_grace_period_seconds  = "0"
@@ -225,8 +225,8 @@ resource "aws_ecs_service" "TraceEvalWorker" {
 }
 
 resource "aws_appautoscaling_target" "trace_eval_worker_target" {
-  max_capacity       = 10
-  min_capacity       = 3
+  max_capacity       = 0
+  min_capacity       = 0
   resource_id        = "service/${var.cluster_name}/${aws_ecs_service.TraceEvalWorker.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
@@ -240,7 +240,7 @@ resource "aws_appautoscaling_policy" "trace_eval_worker_scale_policy" {
   service_namespace  = aws_appautoscaling_target.trace_eval_worker_target.service_namespace
 
   target_tracking_scaling_policy_configuration {
-    target_value       = 50 # average messages count threshold
+    target_value       = 500 # average messages count threshold
     scale_in_cooldown  = 60
     scale_out_cooldown = 60
 
