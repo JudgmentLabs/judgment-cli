@@ -125,9 +125,9 @@ class SupabaseClient:
         existing_project = self.get_existing_project(project_name)
         if existing_project:
             
-            if not typer.confirm(f"A project named '{project_name}' already exists in this organization. Has this project been configured for Judgment?"):
+            if not typer.confirm(f"A project named '{project_name}' already exists in this organization. Has this project been configured for Judgment, and if so, would you like to use it for your self-hosted Judgment instance?"):
                 print("Please choose a different name or delete the existing project.")
-                raise typer.Exit(1)
+                raise typer.Exit(0)
             
         # Create new project
         if not existing_project:
@@ -144,8 +144,19 @@ class SupabaseClient:
         anon_key, service_role_key = self.get_api_keys(project_ref)
         jwt_secret = self.get_project_jwt_secret(project_ref)
 
-        # Load Judgment schema onto the database
         if not existing_project:
+            # Update auth configuration
+            print("Updating auth configuration...")
+            auth_config_url = f"https://api.supabase.com/v1/projects/{project_ref}/config/auth"
+            auth_config_data = {
+                "mailer_autoconfirm": True,
+                "mailer_secure_email_change_enabled": False
+            }
+            res = requests.patch(auth_config_url, headers=self.headers, json=auth_config_data)
+            res.raise_for_status()
+            print("Auth configuration updated successfully!")
+            
+            # Load Judgment schema onto the database
             self.load_schema(url)
             print("Supabase project created and schema loaded successfully!")
         else:

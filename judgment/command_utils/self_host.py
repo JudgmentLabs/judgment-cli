@@ -10,13 +10,18 @@ def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, ro
     """Deploy a self-hosted instance of Judgment."""
     supabase_token = creds["supabase_token"]
     org_id = creds["org_id"]
-    project_name = "Judgment Database"
+    project_name = "Judgment Database 2"
     db_password = creds["db_password"]
     # Create Supabase project and get secrets
     supabase_client = SupabaseClient(supabase_token, org_id, db_password)
     supabase_secrets, project_exists = supabase_client.create_project_and_get_secrets(project_name, supabase_compute_size)
     if not project_exists:
         supabase_client.create_root_user(supabase_secrets["supabase_url"], supabase_secrets["supabase_service_role_key"], root_judgment_email, root_judgment_password)
+    
+    if not typer.confirm("Would you like to proceed with AWS infrastructure deployment?"):
+        print("Exiting... You can run the same command you just ran to deploy the AWS infrastructure with the Supabase project that was just created. Just enter 'y' when prompted to use the existing project.")
+        return
+
     # Change to the AWS directory
     os.chdir(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'self_host', 'aws', 'terraform')))
     

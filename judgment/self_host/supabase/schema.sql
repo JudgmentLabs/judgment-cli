@@ -140,6 +140,70 @@ $$;
 ALTER FUNCTION "public"."add_on_demand_traces"("org_id" "uuid", "count" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."backfill_token_usage_from_traces"("days_back" integer DEFAULT 30, "batch_size" integer DEFAULT 100) RETURNS TABLE("traces_processed" integer, "traces_skipped" integer, "tokens_updated" bigint, "cost_updated" numeric)
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_start_date TIMESTAMPTZ;
+    v_traces_processed INTEGER := 0;
+    v_traces_skipped INTEGER := 0;
+    v_tokens_updated BIGINT := 0;
+    v_cost_updated DECIMAL(10, 6) := 0;
+    v_result JSONB;
+    v_trace_id UUID;
+    v_trace_ids UUID[];
+BEGIN
+    -- Calculate the start date
+    v_start_date := NOW() - (days_back * INTERVAL '1 day');
+    
+    -- Get all eligible trace IDs first and store in an array
+    SELECT ARRAY_AGG(t.trace_id)
+    INTO v_trace_ids
+    FROM public.traces t
+    JOIN public.projects p ON t.project_id = p.project_id
+    JOIN public.organizations o ON p.organization_id = o.id  -- Join with organizations to ensure they exist
+    WHERE t.created_at >= v_start_date
+    AND t.token_counts IS NOT NULL
+    AND jsonb_typeof(t.token_counts) = 'object'
+    LIMIT batch_size;
+    
+    -- Process each trace in the array
+    IF v_trace_ids IS NOT NULL THEN
+        FOREACH v_trace_id IN ARRAY v_trace_ids
+        LOOP
+            BEGIN
+                -- Process each trace and capture the result
+                v_result := public.update_token_usage_from_trace(v_trace_id);
+                
+                -- Count the trace as processed
+                v_traces_processed := v_traces_processed + 1;
+                
+                -- Add tokens and cost from the result if successful
+                IF v_result->'success' = 'true' THEN
+                    v_tokens_updated := v_tokens_updated + COALESCE((v_result->'total_tokens')::BIGINT, 0);
+                    v_cost_updated := v_cost_updated + COALESCE((v_result->'total_cost')::DECIMAL, 0);
+                ELSE
+                    -- Count as skipped if not successful
+                    v_traces_skipped := v_traces_skipped + 1;
+                    RAISE NOTICE 'Skipped trace %: %', v_trace_id, v_result->'message';
+                END IF;
+            EXCEPTION WHEN OTHERS THEN
+                -- Just count as skipped and continue with the next trace
+                v_traces_skipped := v_traces_skipped + 1;
+                RAISE NOTICE 'Error processing trace %: %', v_trace_id, SQLERRM;
+            END;
+        END LOOP;
+    END IF;
+    
+    -- Return the results
+    RETURN QUERY SELECT v_traces_processed, v_traces_skipped, v_tokens_updated, v_cost_updated;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."backfill_token_usage_from_traces"("days_back" integer, "batch_size" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."check_and_reset_organizations"("days_between_resets" integer DEFAULT 30) RETURNS TABLE("organization_id" "uuid", "was_reset" boolean)
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
@@ -205,6 +269,20 @@ $$;
 
 
 ALTER FUNCTION "public"."check_and_reset_organizations"("days_between_resets" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."check_organization_exists"("input_organization_id" "uuid") RETURNS boolean
+    LANGUAGE "plpgsql"
+    AS $$BEGIN
+  RETURN EXISTS (
+    SELECT 1
+    FROM organizations o
+    WHERE o.id = input_organization_id
+  );
+END;$$;
+
+
+ALTER FUNCTION "public"."check_organization_exists"("input_organization_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."check_user_exists"("email_input" "text") RETURNS boolean
@@ -579,6 +657,27 @@ $$;
 
 
 ALTER FUNCTION "public"."get_organization_members"("org_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_organization_token_usage"("org_id" "uuid") RETURNS TABLE("total_tokens" bigint, "prompt_tokens" bigint, "completion_tokens" bigint, "total_cost" numeric)
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        COALESCE(SUM(uor.total_tokens), 0) as total_tokens,
+        COALESCE(SUM(uor.prompt_tokens), 0) as prompt_tokens,
+        COALESCE(SUM(uor.completion_tokens), 0) as completion_tokens,
+        COALESCE(SUM(uor.total_cost), 0.0) as total_cost
+    FROM
+        user_org_resources uor
+    WHERE
+        uor.organization_id = org_id;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_organization_token_usage"("org_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_project_id"("input_project_name" "text", "input_organization_id" "uuid") RETURNS "uuid"
@@ -1350,6 +1449,39 @@ END;$$;
 ALTER FUNCTION "public"."rotate_api_key"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."run_backfill_in_batches"("days_back" integer DEFAULT 30, "batch_size" integer DEFAULT 100, "num_batches" integer DEFAULT 5) RETURNS TABLE("total_traces_processed" integer, "total_traces_skipped" integer, "total_tokens_updated" bigint, "total_cost_updated" numeric)
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_total_processed INTEGER := 0;
+    v_total_skipped INTEGER := 0;
+    v_total_tokens BIGINT := 0;
+    v_total_cost DECIMAL(10, 6) := 0;
+    v_batch_result RECORD;
+    i INTEGER;
+BEGIN
+    FOR i IN 1..num_batches LOOP
+        SELECT * FROM public.backfill_token_usage_from_traces(days_back, batch_size) INTO v_batch_result;
+        
+        v_total_processed := v_total_processed + v_batch_result.traces_processed;
+        v_total_skipped := v_total_skipped + v_batch_result.traces_skipped;
+        v_total_tokens := v_total_tokens + v_batch_result.tokens_updated;
+        v_total_cost := v_total_cost + v_batch_result.cost_updated;
+        
+        -- Exit if we processed fewer traces than the batch size (means we're done)
+        IF v_batch_result.traces_processed + v_batch_result.traces_skipped < batch_size THEN
+            EXIT;
+        END IF;
+    END LOOP;
+    
+    RETURN QUERY SELECT v_total_processed, v_total_skipped, v_total_tokens, v_total_cost;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."run_backfill_in_batches"("days_back" integer, "batch_size" integer, "num_batches" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."set_custom_judgee_limit"("org_id" "uuid", "new_limit" integer) RETURNS boolean
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
@@ -1445,6 +1577,20 @@ END;$$;
 ALTER FUNCTION "public"."set_workspace_name"("p_workspace_name" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."trigger_update_token_usage_from_trace"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+    -- Call the existing update_token_usage_from_trace function with the new trace ID
+    PERFORM public.update_token_usage_from_trace(NEW.trace_id);
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."trigger_update_token_usage_from_trace"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."truncate_trace_spans"() RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
@@ -1481,6 +1627,122 @@ $$;
 
 
 ALTER FUNCTION "public"."update_timestamp"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."update_token_usage_from_trace"("p_trace_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_user_id UUID;
+    v_organization_id UUID;
+    v_token_counts JSONB;
+    v_prompt_tokens BIGINT := 0;
+    v_completion_tokens BIGINT := 0;
+    v_total_tokens BIGINT := 0;
+    v_total_cost DECIMAL(10, 6) := 0.0;
+    v_created_at TIMESTAMPTZ;
+    v_org_exists BOOLEAN;
+BEGIN
+    -- Get trace information
+    SELECT 
+        t.user_id, 
+        p.organization_id,
+        t.token_counts,
+        t.created_at
+    INTO 
+        v_user_id, 
+        v_organization_id,
+        v_token_counts,
+        v_created_at
+    FROM 
+        traces t
+    JOIN 
+        projects p ON t.project_id = p.project_id
+    WHERE 
+        t.trace_id = p_trace_id;
+    
+    -- If trace not found or token_counts is null, return error
+    IF v_user_id IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Trace not found'
+        );
+    END IF;
+    
+    IF v_token_counts IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'No token data found in trace'
+        );
+    END IF;
+    
+    -- Check if the organization exists
+    SELECT EXISTS(SELECT 1 FROM organizations WHERE id = v_organization_id) INTO v_org_exists;
+    
+    IF NOT v_org_exists THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Organization not found',
+            'organization_id', v_organization_id
+        );
+    END IF;
+    
+    -- Extract token counts from the JSONB, handling both integer and decimal values
+    -- Convert to float first, then to bigint to avoid syntax errors
+    v_prompt_tokens := COALESCE(FLOOR((v_token_counts->>'prompt_tokens')::FLOAT)::BIGINT, 0);
+    v_completion_tokens := COALESCE(FLOOR((v_token_counts->>'completion_tokens')::FLOAT)::BIGINT, 0);
+    v_total_tokens := COALESCE(FLOOR((v_token_counts->>'total_tokens')::FLOAT)::BIGINT, 0);
+    
+    -- If total_tokens is not set but we have prompt and completion, calculate it
+    IF v_total_tokens = 0 AND (v_prompt_tokens > 0 OR v_completion_tokens > 0) THEN
+        v_total_tokens := v_prompt_tokens + v_completion_tokens;
+    END IF;
+    
+    -- Calculate cost (simple calculation, can be refined based on model)
+    v_total_cost := (v_prompt_tokens * 0.0000015) + (v_completion_tokens * 0.000002);
+    
+    -- Update user_org_resources
+    INSERT INTO user_org_resources (
+        user_id,
+        organization_id,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        total_cost,
+        last_activity
+    )
+    VALUES (
+        v_user_id,
+        v_organization_id,
+        v_prompt_tokens,
+        v_completion_tokens,
+        v_total_tokens,
+        v_total_cost,
+        v_created_at
+    )
+    ON CONFLICT (user_id, organization_id) 
+    DO UPDATE SET
+        prompt_tokens = user_org_resources.prompt_tokens + v_prompt_tokens,
+        completion_tokens = user_org_resources.completion_tokens + v_completion_tokens,
+        total_tokens = user_org_resources.total_tokens + v_total_tokens,
+        total_cost = user_org_resources.total_cost + v_total_cost,
+        last_activity = GREATEST(user_org_resources.last_activity, v_created_at);
+    
+    -- Return success with token data
+    RETURN jsonb_build_object(
+        'success', true,
+        'user_id', v_user_id,
+        'organization_id', v_organization_id,
+        'prompt_tokens', v_prompt_tokens,
+        'completion_tokens', v_completion_tokens,
+        'total_tokens', v_total_tokens,
+        'total_cost', v_total_cost
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."update_token_usage_from_trace"("p_trace_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."update_updated_at_column"() RETURNS "trigger"
@@ -1848,25 +2110,20 @@ CREATE TABLE IF NOT EXISTS "public"."slack_configs" (
 ALTER TABLE "public"."slack_configs" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."trace_dataset" (
-    "created_at" timestamp without time zone DEFAULT "now"(),
-    "user_id" "uuid" DEFAULT "gen_random_uuid"(),
-    "dataset_alias" "text",
-    "trace_data_outline" "jsonb",
-    "trace_id" "uuid" NOT NULL,
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL
+CREATE TABLE IF NOT EXISTS "public"."trace_span_usage" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "created_at" timestamp with time zone DEFAULT ("now"() AT TIME ZONE 'utc'::"text"),
+    "prompt_tokens" integer,
+    "completion_tokens" integer,
+    "total_tokens" bigint,
+    "prompt_tokens_cost_usd" numeric,
+    "completion_tokens_cost_usd" numeric,
+    "total_cost_usd" numeric,
+    "trace_span_id" "uuid"
 );
 
 
-ALTER TABLE "public"."trace_dataset" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "public"."trace_dataset" IS 'dataset to manage traces run in production';
-
-
-
-COMMENT ON COLUMN "public"."trace_dataset"."trace_id" IS 'unique trace id';
-
+ALTER TABLE "public"."trace_span_usage" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."trace_spans" (
@@ -1981,7 +2238,12 @@ CREATE TABLE IF NOT EXISTS "public"."user_org_resources" (
     "traces_ran" integer DEFAULT 0,
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
-    "last_reset_at" timestamp with time zone DEFAULT "now"()
+    "last_reset_at" timestamp with time zone DEFAULT "now"(),
+    "total_tokens" bigint DEFAULT 0,
+    "prompt_tokens" bigint DEFAULT 0,
+    "completion_tokens" bigint DEFAULT 0,
+    "total_cost" numeric(10,6) DEFAULT 0.0,
+    "last_activity" timestamp with time zone
 );
 
 
@@ -2119,8 +2381,8 @@ ALTER TABLE ONLY "public"."slack_configs"
 
 
 
-ALTER TABLE ONLY "public"."trace_dataset"
-    ADD CONSTRAINT "trace_dataset_pkey" PRIMARY KEY ("id");
+ALTER TABLE ONLY "public"."trace_span_usage"
+    ADD CONSTRAINT "trace_span_usage_pkey" PRIMARY KEY ("id");
 
 
 
@@ -2225,6 +2487,10 @@ CREATE OR REPLACE TRIGGER "update_slack_configs_timestamp" BEFORE UPDATE ON "pub
 
 
 
+CREATE OR REPLACE TRIGGER "update_token_usage_trigger" AFTER INSERT ON "public"."traces" FOR EACH ROW EXECUTE FUNCTION "public"."trigger_update_token_usage_from_trace"();
+
+
+
 CREATE OR REPLACE TRIGGER "update_user_org_resources_updated_at" BEFORE UPDATE ON "public"."user_org_resources" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
 
 
@@ -2234,7 +2500,7 @@ CREATE OR REPLACE TRIGGER "on_user_registration" AFTER INSERT ON "auth"."users" 
 
 
 ALTER TABLE ONLY "public"."alerts"
-    ADD CONSTRAINT "alerts_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("project_id");
+    ADD CONSTRAINT "alerts_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("project_id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 
@@ -2338,6 +2604,11 @@ ALTER TABLE ONLY "public"."sequences"
 
 
 
+ALTER TABLE ONLY "public"."trace_span_usage"
+    ADD CONSTRAINT "trace_span_usage_trace_span_id_fkey" FOREIGN KEY ("trace_span_id") REFERENCES "public"."trace_spans"("span_id") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."trace_spans"
     ADD CONSTRAINT "trace_spans_trace_id_fkey" FOREIGN KEY ("trace_id") REFERENCES "public"."traces"("trace_id") ON UPDATE CASCADE ON DELETE CASCADE;
 
@@ -2409,6 +2680,9 @@ CREATE POLICY "slack_configs_select_policy" ON "public"."slack_configs" FOR SELE
 
 CREATE POLICY "slack_configs_update_policy" ON "public"."slack_configs" FOR UPDATE USING (("auth"."uid"() = "user_id"));
 
+
+
+ALTER TABLE "public"."trace_span_usage" ENABLE ROW LEVEL SECURITY;
 
 
 
@@ -2861,9 +3135,21 @@ GRANT ALL ON FUNCTION "public"."add_on_demand_traces"("org_id" "uuid", "count" i
 
 
 
+GRANT ALL ON FUNCTION "public"."backfill_token_usage_from_traces"("days_back" integer, "batch_size" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."backfill_token_usage_from_traces"("days_back" integer, "batch_size" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."backfill_token_usage_from_traces"("days_back" integer, "batch_size" integer) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."check_and_reset_organizations"("days_between_resets" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."check_and_reset_organizations"("days_between_resets" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."check_and_reset_organizations"("days_between_resets" integer) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."check_organization_exists"("input_organization_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."check_organization_exists"("input_organization_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."check_organization_exists"("input_organization_id" "uuid") TO "service_role";
 
 
 
@@ -2966,6 +3252,12 @@ GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "
 GRANT ALL ON FUNCTION "public"."get_organization_members"("org_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_organization_members"("org_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_organization_members"("org_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_organization_token_usage"("org_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_organization_token_usage"("org_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_organization_token_usage"("org_id" "uuid") TO "service_role";
 
 
 
@@ -3143,6 +3435,12 @@ GRANT ALL ON FUNCTION "public"."rotate_api_key"() TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."run_backfill_in_batches"("days_back" integer, "batch_size" integer, "num_batches" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."run_backfill_in_batches"("days_back" integer, "batch_size" integer, "num_batches" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."run_backfill_in_batches"("days_back" integer, "batch_size" integer, "num_batches" integer) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."set_custom_judgee_limit"("org_id" "uuid", "new_limit" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."set_custom_judgee_limit"("org_id" "uuid", "new_limit" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_custom_judgee_limit"("org_id" "uuid", "new_limit" integer) TO "service_role";
@@ -3161,6 +3459,12 @@ GRANT ALL ON FUNCTION "public"."set_workspace_name"("p_workspace_name" "text") T
 
 
 
+GRANT ALL ON FUNCTION "public"."trigger_update_token_usage_from_trace"() TO "anon";
+GRANT ALL ON FUNCTION "public"."trigger_update_token_usage_from_trace"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."trigger_update_token_usage_from_trace"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."truncate_trace_spans"() TO "anon";
 GRANT ALL ON FUNCTION "public"."truncate_trace_spans"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."truncate_trace_spans"() TO "service_role";
@@ -3176,6 +3480,12 @@ GRANT ALL ON FUNCTION "public"."update_modified_column"() TO "service_role";
 GRANT ALL ON FUNCTION "public"."update_timestamp"() TO "anon";
 GRANT ALL ON FUNCTION "public"."update_timestamp"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."update_timestamp"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."update_token_usage_from_trace"("p_trace_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."update_token_usage_from_trace"("p_trace_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."update_token_usage_from_trace"("p_trace_id" "uuid") TO "service_role";
 
 
 
@@ -3335,9 +3645,9 @@ GRANT ALL ON TABLE "public"."slack_configs" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."trace_dataset" TO "anon";
-GRANT ALL ON TABLE "public"."trace_dataset" TO "authenticated";
-GRANT ALL ON TABLE "public"."trace_dataset" TO "service_role";
+GRANT ALL ON TABLE "public"."trace_span_usage" TO "anon";
+GRANT ALL ON TABLE "public"."trace_span_usage" TO "authenticated";
+GRANT ALL ON TABLE "public"."trace_span_usage" TO "service_role";
 
 
 
