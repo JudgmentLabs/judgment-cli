@@ -20,7 +20,7 @@ def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, ro
     
     if not typer.confirm("Would you like to proceed with AWS infrastructure deployment?"):
         print("Exiting... You can run the same command you just ran to deploy the AWS infrastructure with the Supabase project that was just created. Just enter 'y' when prompted to use the existing project.")
-        return
+        raise typer.Exit(0)
 
     # Change to the AWS directory
     os.chdir(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'self_host', 'aws', 'terraform')))
