@@ -10,7 +10,7 @@ def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, ro
     """Deploy a self-hosted instance of Judgment."""
     supabase_token = creds["supabase_token"]
     org_id = creds["org_id"]
-    project_name = "Judgment Database 2"
+    project_name = "Judgment Database"
     db_password = creds["db_password"]
     # Create Supabase project and get secrets
     supabase_client = SupabaseClient(supabase_token, org_id, db_password)
