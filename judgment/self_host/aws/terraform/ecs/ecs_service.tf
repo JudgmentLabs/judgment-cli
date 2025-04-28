@@ -134,7 +134,7 @@ resource "aws_ecs_service" "RunEvalWorker" {
 
   deployment_maximum_percent         = "200"
   deployment_minimum_healthy_percent = "100"
-  desired_count                      = "3"
+  desired_count                      = "2"
   enable_ecs_managed_tags            = "true"
   enable_execute_command             = "false"
   health_check_grace_period_seconds  = "0"
@@ -153,7 +153,7 @@ resource "aws_ecs_service" "RunEvalWorker" {
 
 resource "aws_appautoscaling_target" "run_eval_worker_target" {
   max_capacity       = 10
-  min_capacity       = 3
+  min_capacity       = 2
   resource_id        = "service/${var.cluster_name}/${aws_ecs_service.RunEvalWorker.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
