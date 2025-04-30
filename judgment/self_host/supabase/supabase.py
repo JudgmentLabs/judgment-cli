@@ -34,7 +34,7 @@ class SupabaseClient:
         conn_str = f"postgresql://postgres.{project_ref}:{self.db_password}@{host}:5432/postgres"
 
         # Connect
-        conn =psycopg2.connect(conn_str)
+        conn = psycopg2.connect(conn_str)
         cursor = conn.cursor()
         try:
             yield cursor
