@@ -31,7 +31,7 @@ class SupabaseClient:
         host = "aws-0-us-west-1.pooler.supabase.com"
 
         # Final connection string
-        conn_str = f"postgresql://postgres.{project_ref}:{self.db_password}@{host}:5432/postgres"
+        conn_str = f"postgresql://postgres.{project_ref}:{self.db_password}@{host}:6543/postgres"
 
         # Connect
         conn = psycopg2.connect(conn_str)
