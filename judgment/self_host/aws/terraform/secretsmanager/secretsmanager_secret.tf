@@ -30,6 +30,7 @@ resource "aws_secretsmanager_secret_version" "prod_api_keys_misc_version" {
     SMTP_EMAIL_ADDRESS = var.invitation_sender_email
     SMTP_APP_PASSWORD = var.invitation_sender_app_password
     EMAIL_SERVICE = var.invitation_email_service
+    ENVIRONMENT = "production"
   })
 }
 
