@@ -168,7 +168,7 @@ def self_host(
     
     # Run the deployment
     try:
-        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name, invitation_email_service)
+        deploy(creds, supabase_compute_size.value, root_judgment_email, root_judgment_password, domain_name, invitation_email_service.value)
     except Exception as e:
         typer.echo(f"Error during deployment: {str(e)}", err=True)
         raise typer.Exit(1)
