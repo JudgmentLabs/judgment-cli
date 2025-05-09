@@ -10,7 +10,7 @@ from .command_utils.self_host import deploy, create_https_listener
 from typing_extensions import Annotated
 
 
-app = typer.Typer(help="Judgment CLI tool for managing self-hosted instances.", add_completion=False)
+app = typer.Typer(help="Judgment CLI tool for managing self-hosted instances.", add_completion=False, pretty_exceptions_enable=False)
 self_host_app = typer.Typer(help="Commands for self-hosting Judgment", add_completion=False)
 app.add_typer(self_host_app, name="self-host")
 
@@ -167,11 +167,7 @@ def self_host(
     typer.echo()
     
     # Run the deployment
-    try:
-        deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name, invitation_email_service)
-    except Exception as e:
-        typer.echo(f"Error during deployment: {str(e)}", err=True)
-        raise typer.Exit(1)
+    deploy(creds, supabase_compute_size, root_judgment_email, root_judgment_password, domain_name, invitation_email_service)
     
 @self_host_app.command(name="https-listener")
 def https_listener():
