@@ -24,7 +24,17 @@ class SupabaseClient:
     @contextmanager
     def _get_db_connection(self, db_url: str):
         """Helper method to manage database connections and cursors."""
-        conn = psycopg2.connect(f"postgres://postgres:{self.db_password}@db.{db_url.replace('https://', '')}:5432/postgres")
+        # Extract project ref from db_url
+        project_ref = db_url.replace('https://', '').split('.')[0]
+
+        # Hardcoded host
+        host = "aws-0-us-west-1.pooler.supabase.com"
+
+        # Final connection string
+        conn_str = f"postgresql://postgres.{project_ref}:{self.db_password}@{host}:6543/postgres"
+
+        # Connect
+        conn = psycopg2.connect(conn_str)
         cursor = conn.cursor()
         try:
             yield cursor
