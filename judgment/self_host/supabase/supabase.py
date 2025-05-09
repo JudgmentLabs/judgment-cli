@@ -11,6 +11,10 @@ from supabase import create_client, Client
 
 load_dotenv()
 
+class NonRootUserError(Exception):
+    """Exception raised when a non-root user attempts to use root-only functionality."""
+    pass
+
 class SupabaseClient:
     def __init__(self, supabase_token: str, org_id: str, db_password: str):
         self.supabase_token = supabase_token
@@ -121,6 +125,10 @@ class SupabaseClient:
             
         Returns:
             The user ID of the root user (either existing or newly created)
+            
+        Raises:
+            NonRootUserError: If the provided credentials belong to a non-root user
+            Exception: For other errors during user creation or authentication
         """
         print("Checking for existing root user with provided credentials...")
         supabase: Client = create_client(supabase_url, supabase_service_role_key)
@@ -135,13 +143,13 @@ class SupabaseClient:
             
             # Verify this is a root user
             if user.user_metadata.get("role") != "root":
-                raise Exception("The provided credentials belong to a non-root user. Please run the command again with root user credentials or new credentials to create a root user with.")
+                raise NonRootUserError("The provided credentials belong to a non-root user. Please run the command again with root user credentials or new credentials to create a root user with.")
                 
             print("Found existing root user with matching credentials!")
             return user.id
-        except Exception as e:
-            if "non-root user" in str(e):
-                raise e
+        except NonRootUserError:
+            raise
+        except Exception:
             # If sign in fails, try to create the user
             print("Creating new root user...")
             try:

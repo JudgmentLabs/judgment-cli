@@ -10,18 +10,14 @@ def deploy(creds: dict, supabase_compute_size: str, root_judgment_email: str, ro
     """Deploy a self-hosted instance of Judgment."""
     supabase_token = creds["supabase_token"]
     org_id = creds["org_id"]
-    project_name = "Judgment Database 2"
+    project_name = "Judgment Database"
     db_password = creds["db_password"]
     # Create Supabase project and get secrets
     supabase_client = SupabaseClient(supabase_token, org_id, db_password)
     supabase_secrets, project_exists = supabase_client.create_project_and_get_secrets(project_name, supabase_compute_size)
-    root_user_id = supabase_client.create_root_user(supabase_secrets["supabase_url"], supabase_secrets["supabase_service_role_key"], root_judgment_email, root_judgment_password)
-    root_user_api_key, root_user_org_id = supabase_client.get_user_api_key_and_org(supabase_secrets["supabase_url"], supabase_secrets["supabase_service_role_key"], root_user_id)
+    if not project_exists:
+        supabase_client.create_root_user(supabase_secrets["supabase_url"], supabase_secrets["supabase_service_role_key"], root_judgment_email, root_judgment_password)
     
-    print(f"Root user Judgment API key: {root_user_api_key}")
-    print(f"Root user organization ID: {root_user_org_id}")
-    print(f"Make sure to save these credentials in a secure location. You will need them to run the Judgeval SDK against your self-hosted Judgment instance.")
-
     if not typer.confirm("Would you like to proceed with AWS infrastructure deployment?"):
         print("Exiting... You can run the same command you just ran to deploy the AWS infrastructure with the Supabase project that was just created. Just enter 'y' when prompted to use the existing project.")
         raise typer.Exit(0)
