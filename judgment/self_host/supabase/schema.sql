@@ -542,6 +542,42 @@ $$;
 ALTER FUNCTION "public"."get_dataset_stats_by_project"("input_project_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) RETURNS TABLE("name" "text", "created_at" timestamp with time zone, "creator_name" "text", "example_count" integer, "scorers" "jsonb")
+    LANGUAGE "sql"
+    AS $$
+    select
+        er.name,
+        er.created_at,
+        ud.first_name || ' ' || ud.last_name as creator_name,
+        (
+            select count(*) from public.examples e
+            where e.experiment_run_id = er.id
+        ) as example_count,
+        (
+            select jsonb_object_agg(sd_scores.name, sd_scores.scores_array)
+            from (
+                select
+                    sd.name,
+                    jsonb_agg(sd.score) filter (where sd.score is not null) as scores_array
+                from public.scorer_data sd
+                where sd.example_id in (
+                    select e.example_id from public.examples e
+                    where e.experiment_run_id = er.id
+                )
+                group by sd.name
+            ) as sd_scores
+        ) as scorers
+    from public.experiment_runs er
+    join public.user_data ud on ud.id = er.user_id
+    where er.project_id = project_id_input
+      and er.created_at between start_timestamp_input and end_timestamp_input
+    order by er.created_at desc;
+$$;
+
+
+ALTER FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") RETURNS SETOF "public"."experiment"
     LANGUAGE "plpgsql"
     AS $$
@@ -731,6 +767,38 @@ END;$$;
 ALTER FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."get_project_summaries"("org_id" "uuid") RETURNS TABLE("project_id" "uuid", "project_name" "text", "first_name" "text", "last_name" "text", "updated_at" timestamp with time zone, "total_experiment_runs" integer, "total_traces" integer)
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.project_id,
+        p.project_name,
+        u.first_name,
+        u.last_name,
+        COALESCE(GREATEST(MAX(er.created_at), MAX(t.created_at)), p.created_at) AS updated_at,
+        COUNT(DISTINCT er.id)::INTEGER AS total_experiment_runs,
+        COUNT(DISTINCT t.trace_id)::INTEGER AS total_traces
+    FROM 
+        projects p
+    LEFT JOIN 
+        experiment_runs er ON p.project_id = er.project_id
+    LEFT JOIN 
+        traces t ON p.project_id = t.project_id
+    LEFT JOIN 
+        user_data u ON p.creator_id = u.id
+    WHERE 
+        p.organization_id = org_id
+    GROUP BY 
+        p.project_id, p.project_name, u.first_name, u.last_name;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_project_summaries"("org_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") RETURNS TABLE("root_sequence_id" "uuid", "root_sequence_name" "text", "latest_created_at" timestamp with time zone)
     LANGUAGE "sql"
     AS $$
@@ -878,6 +946,50 @@ $$;
 
 
 ALTER FUNCTION "public"."get_trace_aggregates"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) RETURNS "jsonb"
+    LANGUAGE "plpgsql"
+    AS $$
+DECLARE
+    result_json JSONB;
+BEGIN
+    SELECT jsonb_agg(trace_info) INTO result_json
+    FROM (
+        SELECT
+            t.trace_id,
+            t.name AS trace_name,
+            t.duration AS latency,
+            t.created_at AS timestamp,
+            t.has_notification,
+            t.aggregate_token_usage,
+            ud.first_name || ' ' || ud.last_name AS creator,
+            (
+                SELECT jsonb_object_agg(sc.name, sc.raw_scores)
+                FROM (
+                    SELECT
+                        sd.name,
+                        jsonb_agg(sd.score) FILTER (WHERE sd.score IS NOT NULL) AS raw_scores
+                    FROM trace_spans ts
+                    JOIN examples e ON e.trace_span_id = ts.span_id
+                    JOIN scorer_data sd ON sd.example_id = e.example_id
+                    WHERE ts.trace_id = t.trace_id
+                    GROUP BY sd.name
+                ) sc
+            ) AS scores
+        FROM traces t
+        JOIN user_data ud ON t.user_id = ud.id
+        WHERE t.project_id = input_project_id
+          AND t.created_at BETWEEN start_time AND end_time
+        ORDER BY t.created_at DESC
+    ) AS trace_info;
+
+    RETURN result_json;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."handle_new_user_data"() RETURNS "trigger"
@@ -1229,9 +1341,10 @@ CREATE TABLE IF NOT EXISTS "public"."examples" (
     "name" "text",
     "created_at" timestamp with time zone DEFAULT ("now"() AT TIME ZONE 'utc'::"text"),
     "dataset_id" "uuid",
-    "eval_results_id" "uuid",
     "sequence_id" "uuid",
-    "sequence_order" integer
+    "sequence_order" integer,
+    "trace_span_id" "uuid",
+    "experiment_run_id" "uuid"
 );
 
 
@@ -1745,6 +1858,49 @@ $$;
 ALTER FUNCTION "public"."update_token_usage_from_trace"("p_trace_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."update_trace_aggregate_token_usage_json"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+DECLARE
+    usage_data JSONB;
+    parent_trace_id UUID;
+BEGIN
+    -- Find the parent trace for the affected span
+    SELECT ts.trace_id
+    INTO parent_trace_id
+    FROM public.trace_spans ts
+    WHERE ts.span_id = COALESCE(NEW.trace_span_id, OLD.trace_span_id)
+    LIMIT 1;
+
+    -- If parent trace found, recalculate totals
+    IF parent_trace_id IS NOT NULL THEN
+        SELECT jsonb_build_object(
+            'prompt_tokens', COALESCE(SUM(tsu.prompt_tokens), 0),
+            'completion_tokens', COALESCE(SUM(tsu.completion_tokens), 0),
+            'total_tokens', COALESCE(SUM(tsu.total_tokens), 0),
+            'prompt_tokens_cost_usd', COALESCE(SUM(tsu.prompt_tokens_cost_usd), 0),
+            'completion_tokens_cost_usd', COALESCE(SUM(tsu.completion_tokens_cost_usd), 0),
+            'total_cost_usd', COALESCE(SUM(tsu.total_cost_usd), 0)
+        )
+        INTO usage_data
+        FROM public.trace_spans ts
+        JOIN public.trace_span_token_usage tsu ON tsu.trace_span_id = ts.span_id
+        WHERE ts.trace_id = parent_trace_id;
+
+        -- Update the aggregate_token_usage field on the trace
+        UPDATE public.traces
+        SET aggregate_token_usage = usage_data
+        WHERE trace_id = parent_trace_id;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."update_trace_aggregate_token_usage_json"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."update_updated_at_column"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -1819,11 +1975,16 @@ CREATE TABLE IF NOT EXISTS "public"."annotation_queue" (
     "span_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
     "status" "text" DEFAULT 'pending'::"text",
-    "name" "text"
+    "name" "text",
+    "project_id" "uuid"
 );
 
 
 ALTER TABLE "public"."annotation_queue" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."annotation_queue"."project_id" IS 'project id for a per project level selection';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."api_key_to_id" (
@@ -1859,54 +2020,16 @@ COMMENT ON COLUMN "public"."custom_scorers"."slug" IS 'Uniquely identify scorer'
 
 
 
-CREATE TABLE IF NOT EXISTS "public"."eval_results" (
-    "id" "uuid" NOT NULL,
-    "user_id" "uuid" NOT NULL,
-    "eval_result_run" "text" NOT NULL,
-    "eval_result_index" integer,
-    "result" "jsonb" NOT NULL,
-    "trace_id" "uuid",
-    "created_at" timestamp with time zone,
-    "completed_at" timestamp with time zone,
-    "project_id" "uuid" NOT NULL,
-    "trace_span_id" "uuid"
-);
-
-
-ALTER TABLE "public"."eval_results" OWNER TO "postgres";
-
-
-COMMENT ON COLUMN "public"."eval_results"."trace_id" IS 'OPTIONAL, trace to go along with the example';
-
-
-
-COMMENT ON COLUMN "public"."eval_results"."created_at" IS 'When the eval run entry was saved to DB';
-
-
-
-COMMENT ON COLUMN "public"."eval_results"."completed_at" IS 'When the eval_run are completed';
-
-
-
-CREATE TABLE IF NOT EXISTS "public"."eval_scorer_data" (
+CREATE TABLE IF NOT EXISTS "public"."experiment_runs" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "name" "text" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
-    "eval_result_id" "uuid" NOT NULL,
-    "scorer_name" "text",
-    "error" "text",
-    "score" real,
-    "reason" "text",
-    "success" boolean,
-    "threshold" real,
-    "strict_mode" boolean,
-    "verbose_logs" "text",
-    "evaluation_cost" real,
-    "evaluation_model" "text",
-    "additional_metadata" "text"
+    "project_id" "uuid" NOT NULL
 );
 
 
-ALTER TABLE "public"."eval_scorer_data" OWNER TO "postgres";
+ALTER TABLE "public"."experiment_runs" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."invitations" (
@@ -2055,6 +2178,28 @@ CREATE TABLE IF NOT EXISTS "public"."scheduled_reports" (
 ALTER TABLE "public"."scheduled_reports" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."scorer_data" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "example_id" "uuid",
+    "sequence_id" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "name" "text",
+    "error" "text",
+    "score" real,
+    "reason" "text",
+    "success" boolean,
+    "threshold" real,
+    "strict_mode" boolean,
+    "verbose_logs" "text",
+    "evaluation_cost" real,
+    "evaluation_model" "text",
+    "additional_metadata" "jsonb"
+);
+
+
+ALTER TABLE "public"."scorer_data" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."self_hosted_endpoints" (
     "url" character varying NOT NULL,
     "custom_data" "json",
@@ -2067,28 +2212,17 @@ CREATE TABLE IF NOT EXISTS "public"."self_hosted_endpoints" (
 ALTER TABLE "public"."self_hosted_endpoints" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."sequence_roots" (
-    "root_sequence_id" "uuid" NOT NULL,
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "dataset_id" "uuid",
-    "eval_result_id" "uuid"
-);
-
-
-ALTER TABLE "public"."sequence_roots" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "public"."sequences" (
     "sequence_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "name" "text" DEFAULT ''::"text",
     "dataset_id" "uuid",
     "sequence_order" integer,
-    "eval_results_id" "uuid",
     "parent_sequence_id" "uuid",
     "inputs" "text",
     "output" "text",
-    "root_sequence_id" "uuid" NOT NULL
+    "root_sequence_id" "uuid" NOT NULL,
+    "experiment_run_id" "uuid"
 );
 
 
@@ -2110,20 +2244,19 @@ CREATE TABLE IF NOT EXISTS "public"."slack_configs" (
 ALTER TABLE "public"."slack_configs" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."trace_span_usage" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "created_at" timestamp with time zone DEFAULT ("now"() AT TIME ZONE 'utc'::"text"),
-    "prompt_tokens" integer,
-    "completion_tokens" integer,
-    "total_tokens" bigint,
-    "prompt_tokens_cost_usd" numeric,
-    "completion_tokens_cost_usd" numeric,
-    "total_cost_usd" numeric,
-    "trace_span_id" "uuid"
+CREATE TABLE IF NOT EXISTS "public"."trace_span_token_usage" (
+    "trace_span_id" "uuid" NOT NULL,
+    "prompt_tokens" integer DEFAULT 0,
+    "completion_tokens" integer DEFAULT 0,
+    "total_tokens" integer DEFAULT 0,
+    "prompt_tokens_cost_usd" numeric(10,6) DEFAULT 0,
+    "completion_tokens_cost_usd" numeric(10,6) DEFAULT 0,
+    "total_cost_usd" numeric(10,6) DEFAULT 0,
+    "created_at" timestamp with time zone DEFAULT "now"()
 );
 
 
-ALTER TABLE "public"."trace_span_usage" OWNER TO "postgres";
+ALTER TABLE "public"."trace_span_token_usage" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."trace_spans" (
@@ -2137,7 +2270,6 @@ CREATE TABLE IF NOT EXISTS "public"."trace_spans" (
     "output" "jsonb",
     "duration" real,
     "trace_id" "uuid",
-    "usage" "jsonb",
     "annotation" "jsonb"
 );
 
@@ -2154,7 +2286,8 @@ CREATE TABLE IF NOT EXISTS "public"."traces" (
     "token_counts" "jsonb",
     "project_id" "uuid" NOT NULL,
     "has_notification" boolean DEFAULT false,
-    "entries" "jsonb"
+    "entries" "jsonb",
+    "aggregate_token_usage" "jsonb" DEFAULT '{}'::"jsonb"
 );
 
 
@@ -2291,18 +2424,13 @@ ALTER TABLE ONLY "public"."datasets"
 
 
 
-ALTER TABLE ONLY "public"."eval_results"
-    ADD CONSTRAINT "eval_results_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE ONLY "public"."eval_scorer_data"
-    ADD CONSTRAINT "eval_scorer_data_pkey" PRIMARY KEY ("id");
-
-
-
 ALTER TABLE ONLY "public"."examples"
     ADD CONSTRAINT "examples_pkey" PRIMARY KEY ("example_id");
+
+
+
+ALTER TABLE ONLY "public"."experiment_runs"
+    ADD CONSTRAINT "experiment_runs_pkey" PRIMARY KEY ("id");
 
 
 
@@ -2356,13 +2484,13 @@ ALTER TABLE ONLY "public"."scheduled_reports"
 
 
 
+ALTER TABLE ONLY "public"."scorer_data"
+    ADD CONSTRAINT "scorer_data_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."self_hosted_endpoints"
     ADD CONSTRAINT "self_hosted_endpoints_pkey" PRIMARY KEY ("url");
-
-
-
-ALTER TABLE ONLY "public"."sequence_roots"
-    ADD CONSTRAINT "sequence_roots_pkey" PRIMARY KEY ("root_sequence_id");
 
 
 
@@ -2381,8 +2509,8 @@ ALTER TABLE ONLY "public"."slack_configs"
 
 
 
-ALTER TABLE ONLY "public"."trace_span_usage"
-    ADD CONSTRAINT "trace_span_usage_pkey" PRIMARY KEY ("id");
+ALTER TABLE ONLY "public"."trace_span_token_usage"
+    ADD CONSTRAINT "trace_span_token_usage_pkey" PRIMARY KEY ("trace_span_id");
 
 
 
@@ -2431,19 +2559,15 @@ ALTER TABLE ONLY "public"."org_to_stripe_id"
 
 
 
-CREATE INDEX "eval_results_name_idx" ON "public"."eval_results" USING "btree" ("eval_result_run");
-
-
-
-CREATE INDEX "eval_results_user_id_idx" ON "public"."eval_results" USING "btree" ("user_id");
-
-
-
 CREATE INDEX "idx_alerts_project_id" ON "public"."alerts" USING "btree" ("project_id");
 
 
 
 CREATE INDEX "idx_alerts_rule_id" ON "public"."alerts" USING "btree" ("rule_id");
+
+
+
+CREATE INDEX "idx_examples_trace_span_id" ON "public"."examples" USING "btree" ("trace_span_id");
 
 
 
@@ -2456,6 +2580,26 @@ CREATE INDEX "idx_scheduled_reports_org_id" ON "public"."scheduled_reports" USIN
 
 
 CREATE INDEX "idx_scheduled_reports_user_id" ON "public"."scheduled_reports" USING "btree" ("user_id");
+
+
+
+CREATE INDEX "idx_scorer_data_example_id" ON "public"."scorer_data" USING "btree" ("example_id");
+
+
+
+CREATE INDEX "idx_scorer_data_sequence_id" ON "public"."scorer_data" USING "btree" ("sequence_id");
+
+
+
+CREATE INDEX "idx_trace_spans_trace_id" ON "public"."trace_spans" USING "btree" ("trace_id");
+
+
+
+CREATE INDEX "idx_traces_project_id" ON "public"."traces" USING "btree" ("project_id");
+
+
+
+CREATE INDEX "idx_traces_user_id" ON "public"."traces" USING "btree" ("user_id");
 
 
 
@@ -2480,6 +2624,10 @@ CREATE INDEX "user_org_resources_user_id_idx" ON "public"."user_org_resources" U
 
 
 CREATE OR REPLACE TRIGGER "on_user_data_inserted" AFTER INSERT ON "public"."user_data" FOR EACH ROW EXECUTE FUNCTION "public"."create_default_organization"();
+
+
+
+CREATE OR REPLACE TRIGGER "trigger_update_trace_aggregate_token_usage_json" AFTER INSERT OR DELETE OR UPDATE ON "public"."trace_span_token_usage" FOR EACH ROW EXECUTE FUNCTION "public"."update_trace_aggregate_token_usage_json"();
 
 
 
@@ -2509,6 +2657,11 @@ ALTER TABLE ONLY "public"."alerts"
 
 
 
+ALTER TABLE ONLY "public"."annotation_queue"
+    ADD CONSTRAINT "annotation_queue_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("project_id");
+
+
+
 ALTER TABLE ONLY "public"."custom_scorers"
     ADD CONSTRAINT "custom_scorers_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "public"."organizations"("id") ON DELETE SET NULL;
 
@@ -2519,43 +2672,33 @@ ALTER TABLE ONLY "public"."custom_scorers"
 
 
 
-ALTER TABLE ONLY "public"."eval_results"
-    ADD CONSTRAINT "eval_results_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("project_id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."eval_results"
-    ADD CONSTRAINT "eval_results_trace_id_fkey" FOREIGN KEY ("trace_id") REFERENCES "public"."traces"("trace_id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."eval_results"
-    ADD CONSTRAINT "eval_results_trace_span_id_fkey" FOREIGN KEY ("trace_span_id") REFERENCES "public"."trace_spans"("span_id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."eval_results"
-    ADD CONSTRAINT "eval_results_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user_data"("id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."eval_scorer_data"
-    ADD CONSTRAINT "eval_scorer_data_eval_result_id_fkey" FOREIGN KEY ("eval_result_id") REFERENCES "public"."eval_results"("id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
 ALTER TABLE ONLY "public"."examples"
     ADD CONSTRAINT "examples_dataset_id_fkey" FOREIGN KEY ("dataset_id") REFERENCES "public"."datasets"("dataset_id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 
 ALTER TABLE ONLY "public"."examples"
-    ADD CONSTRAINT "examples_eval_results_id_fkey" FOREIGN KEY ("eval_results_id") REFERENCES "public"."eval_results"("id") ON UPDATE CASCADE ON DELETE CASCADE;
+    ADD CONSTRAINT "examples_experiment_run_id_fkey" FOREIGN KEY ("experiment_run_id") REFERENCES "public"."experiment_runs"("id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 
 ALTER TABLE ONLY "public"."examples"
     ADD CONSTRAINT "examples_sequence_id_fkey" FOREIGN KEY ("sequence_id") REFERENCES "public"."sequences"("sequence_id") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."examples"
+    ADD CONSTRAINT "examples_trace_span_id_fkey" FOREIGN KEY ("trace_span_id") REFERENCES "public"."trace_spans"("span_id") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."experiment_runs"
+    ADD CONSTRAINT "experiment_runs_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("project_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."experiment_runs"
+    ADD CONSTRAINT "experiment_runs_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user_data"("id") ON DELETE CASCADE;
 
 
 
@@ -2585,12 +2728,17 @@ ALTER TABLE ONLY "public"."project_datasets"
 
 
 ALTER TABLE ONLY "public"."projects"
-    ADD CONSTRAINT "projects_creator_id_fkey" FOREIGN KEY ("creator_id") REFERENCES "public"."user_data"("id") ON UPDATE CASCADE ON DELETE RESTRICT;
+    ADD CONSTRAINT "projects_creator_id_fkey" FOREIGN KEY ("creator_id") REFERENCES "public"."user_data"("id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 
-ALTER TABLE ONLY "public"."sequence_roots"
-    ADD CONSTRAINT "sequence_roots_dataset_id_fkey" FOREIGN KEY ("dataset_id") REFERENCES "public"."datasets"("dataset_id") ON UPDATE CASCADE ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."scorer_data"
+    ADD CONSTRAINT "scorer_data_example_id_fkey" FOREIGN KEY ("example_id") REFERENCES "public"."examples"("example_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."scorer_data"
+    ADD CONSTRAINT "scorer_data_sequence_id_fkey" FOREIGN KEY ("sequence_id") REFERENCES "public"."sequences"("sequence_id") ON DELETE CASCADE;
 
 
 
@@ -2600,12 +2748,12 @@ ALTER TABLE ONLY "public"."sequences"
 
 
 ALTER TABLE ONLY "public"."sequences"
-    ADD CONSTRAINT "sequences_eval_results_id_fkey" FOREIGN KEY ("eval_results_id") REFERENCES "public"."eval_results"("id") ON UPDATE CASCADE ON DELETE CASCADE;
+    ADD CONSTRAINT "sequences_experiment_run_id_fkey" FOREIGN KEY ("experiment_run_id") REFERENCES "public"."experiment_runs"("id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 
-ALTER TABLE ONLY "public"."trace_span_usage"
-    ADD CONSTRAINT "trace_span_usage_trace_span_id_fkey" FOREIGN KEY ("trace_span_id") REFERENCES "public"."trace_spans"("span_id") ON UPDATE CASCADE ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."trace_span_token_usage"
+    ADD CONSTRAINT "trace_span_token_usage_trace_span_id_fkey" FOREIGN KEY ("trace_span_id") REFERENCES "public"."trace_spans"("span_id") ON DELETE CASCADE;
 
 
 
@@ -2682,19 +2830,12 @@ CREATE POLICY "slack_configs_update_policy" ON "public"."slack_configs" FOR UPDA
 
 
 
-ALTER TABLE "public"."trace_span_usage" ENABLE ROW LEVEL SECURITY;
-
-
 
 
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
 
-
-
-
-ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."eval_results";
 
 
 
@@ -3231,6 +3372,12 @@ GRANT ALL ON FUNCTION "public"."get_dataset_stats_by_project"("input_project_id"
 
 
 
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") TO "service_role";
@@ -3273,6 +3420,12 @@ GRANT ALL ON FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid
 
 
 
+GRANT ALL ON FUNCTION "public"."get_project_summaries"("org_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_project_summaries"("org_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_project_summaries"("org_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") TO "service_role";
@@ -3294,6 +3447,12 @@ GRANT ALL ON FUNCTION "public"."get_tokens_for_user"("user_id" "uuid") TO "servi
 GRANT ALL ON FUNCTION "public"."get_trace_aggregates"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_trace_aggregates"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_trace_aggregates"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "service_role";
 
 
 
@@ -3489,6 +3648,12 @@ GRANT ALL ON FUNCTION "public"."update_token_usage_from_trace"("p_trace_id" "uui
 
 
 
+GRANT ALL ON FUNCTION "public"."update_trace_aggregate_token_usage_json"() TO "anon";
+GRANT ALL ON FUNCTION "public"."update_trace_aggregate_token_usage_json"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."update_trace_aggregate_token_usage_json"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "anon";
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "service_role";
@@ -3555,15 +3720,9 @@ GRANT ALL ON TABLE "public"."custom_scorers" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."eval_results" TO "anon";
-GRANT ALL ON TABLE "public"."eval_results" TO "authenticated";
-GRANT ALL ON TABLE "public"."eval_results" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."eval_scorer_data" TO "anon";
-GRANT ALL ON TABLE "public"."eval_scorer_data" TO "authenticated";
-GRANT ALL ON TABLE "public"."eval_scorer_data" TO "service_role";
+GRANT ALL ON TABLE "public"."experiment_runs" TO "anon";
+GRANT ALL ON TABLE "public"."experiment_runs" TO "authenticated";
+GRANT ALL ON TABLE "public"."experiment_runs" TO "service_role";
 
 
 
@@ -3621,15 +3780,15 @@ GRANT ALL ON TABLE "public"."scheduled_reports" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."scorer_data" TO "anon";
+GRANT ALL ON TABLE "public"."scorer_data" TO "authenticated";
+GRANT ALL ON TABLE "public"."scorer_data" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."self_hosted_endpoints" TO "anon";
 GRANT ALL ON TABLE "public"."self_hosted_endpoints" TO "authenticated";
 GRANT ALL ON TABLE "public"."self_hosted_endpoints" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."sequence_roots" TO "anon";
-GRANT ALL ON TABLE "public"."sequence_roots" TO "authenticated";
-GRANT ALL ON TABLE "public"."sequence_roots" TO "service_role";
 
 
 
@@ -3645,9 +3804,9 @@ GRANT ALL ON TABLE "public"."slack_configs" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."trace_span_usage" TO "anon";
-GRANT ALL ON TABLE "public"."trace_span_usage" TO "authenticated";
-GRANT ALL ON TABLE "public"."trace_span_usage" TO "service_role";
+GRANT ALL ON TABLE "public"."trace_span_token_usage" TO "anon";
+GRANT ALL ON TABLE "public"."trace_span_token_usage" TO "authenticated";
+GRANT ALL ON TABLE "public"."trace_span_token_usage" TO "service_role";
 
 
 
