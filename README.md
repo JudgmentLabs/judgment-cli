@@ -232,16 +232,18 @@ judgment self-host main [OPTIONS]
 
 Required options:
 
-- `--root-judgment-email`, `-e`: Root user email  
-- `--root-judgment-password`, `-p`: Root user password  
-- `--domain-name`, `-d`: Your domain for SSL
+- `--root-judgment-email` or `-e`: Email address for the root Judgment user
+- `--root-judgment-password` or `-p`: Password for the root Judgment user
+- `--domain-name` or `-d`: Domain name to request SSL certificate for (make sure you own this domain)
 
 Optional options:
 > ⚠️ Supabase free tier only supports `nano` for `--supabase-compute-size`. Larger sizes require a paid plan.
 
-- `--creds-file`, `-c`: Path to your `creds.json` (default: `creds.json`)  
-- `--supabase-compute-size`, `-s`: Supabase instance size (default: `small`)  
-- `--invitation-email-service`, `-i`: Email provider (default: `gmail`)
+- `--creds-file` or `-c`: Path to credentials file (default: creds.json)
+- `--supabase-compute-size` or `-s`: Size of the Supabase compute instance (default: small)
+  - Available sizes: nano, micro, small, medium, large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge, 16xlarge
+- `--invitation-email-service` or `-i`: Email service for sending organization invitations (default: gmail)
+  - Available services: gmail, outlook, yahoo, zoho, fastmail
 
 Example usage:
 ```bash
