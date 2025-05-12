@@ -115,7 +115,7 @@ The Judgment CLI provides the following commands:
 The `self-host` command is used to deploy and manage your own self-hosted instance of Judgment.
 
 - `self-host main` deploys a Supabase project and the Judgment AWS infrastructure.
-- `self-host https-listener` sets up HTTPS and is only needed if you skip it in the `main` command.
+- `self-host https-listener` configures an HTTPS listener for your self-hosted Judgment instance and is only needed if you skip the listener setup in the `main` command.
 
 ## Usage
 
@@ -164,7 +164,7 @@ sudo apt install awscli
 ```
 </details>
 
-Then configure it:
+After installation, configure your local environment with the relevant AWS credentials:
 
 ```bash
 aws configure
@@ -282,5 +282,5 @@ judgment self-host https-listener
 
 This command:
 
-1. Sets up the HTTPS listener with your certificate  
+1. Sets up an HTTPS listener with your ACM-issued SSL certificate  
 2. Returns the final HTTPS endpoint of your self-hosted Judgment server
