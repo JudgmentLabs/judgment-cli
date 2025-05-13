@@ -30,12 +30,23 @@ module ecs {
   mq_broker_name = module.mq.aws_mq_broker_rabbitmq-judgment_name
 }
 
+module eventbridge {
+  source = "./eventbridge"
+  judgment_lambda_arn = module.lambda.judgment_lambda_arn
+  websockets_lambda_arn = module.lambda.websockets_lambda_arn
+  run_eval_worker_lambda_arn = module.lambda.run_eval_worker_lambda_arn
+}
+
 module iam {
   source = "./iam"
   prod_api_keys_misc_arn = module.secretsmanager.prod_api_keys_misc_arn
   prod_api_keys_openai_arn = module.secretsmanager.prod_api_keys_openai_arn
   prod_creds_rabbitmq_arn = module.secretsmanager.prod_creds_rabbitmq_arn
   prod_api_keys_stripe_arn = module.secretsmanager.prod_api_keys_stripe_arn
+}
+
+module lambda {
+  source = "./lambda"
 }
 
 module mq {
