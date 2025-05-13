@@ -30,10 +30,6 @@ module ecs {
   mq_broker_name = module.mq.aws_mq_broker_rabbitmq-judgment_name
 }
 
-# module eventbridge {
-#   source = "./eventbridge"
-# }
-
 module iam {
   source = "./iam"
   prod_api_keys_misc_arn = module.secretsmanager.prod_api_keys_misc_arn
@@ -45,9 +41,6 @@ module iam {
 module lambda {
   source = "./lambda"
   lambda_exec_role_arn = module.iam.lambda_exec_role_arn
-  # cloudwatch_event_rule_arn_judgment = module.eventbridge.cloudwatch_event_rule_arn_judgment
-  # cloudwatch_event_rule_arn_websockets = module.eventbridge.cloudwatch_event_rule_arn_websockets
-  # cloudwatch_event_rule_arn_run_eval_worker = module.eventbridge.cloudwatch_event_rule_arn_run_eval_worker
 }
 
 module mq {
@@ -82,13 +75,3 @@ module sg {
 module vpc {
   source = "./vpc"
 }
-
-# module eventbridge_targets {
-#   source = "./eventbridge_targets"
-#   judgment_lambda_arn = module.lambda.judgment_lambda_arn
-#   websockets_lambda_arn = module.lambda.websockets_lambda_arn
-#   run_eval_worker_lambda_arn = module.lambda.run_eval_worker_lambda_arn
-#   cloudwatch_event_rule_arn_judgment = module.eventbridge.cloudwatch_event_rule_arn_judgment
-#   cloudwatch_event_rule_arn_websockets = module.eventbridge.cloudwatch_event_rule_arn_websockets
-#   cloudwatch_event_rule_arn_run_eval_worker = module.eventbridge.cloudwatch_event_rule_arn_run_eval_worker
-# }
