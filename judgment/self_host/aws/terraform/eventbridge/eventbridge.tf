@@ -29,12 +29,12 @@ resource "aws_cloudwatch_event_rule" "sns_from_primary_account_websockets" {
         source = ["aws.sns"]
         "detail-type" = ["ECR Image Push"]
         "detail" = {
-            "repository-name" = ["judgement-websockets"]
+            "repository-name" = ["judgment-websockets"]
         }
     })
 }
 
-resource "aws_cloudwatch_event_rule" "sns_from_primary_account" {
+resource "aws_cloudwatch_event_rule" "sns_from_primary_account_run_eval_worker" {
     name = "SNSFromPrimaryAccountRunEvalWorker"
     event_pattern = jsonencode({
         source = ["aws.sns"]
@@ -43,22 +43,4 @@ resource "aws_cloudwatch_event_rule" "sns_from_primary_account" {
             "repository-name" = ["run-eval-worker"]
         }
     })
-}
-
-resource "aws_cloudwatch_event_target" "sns_from_primary_account_target_judgment" {
-    rule = aws_cloudwatch_event_rule.sns_from_primary_account_judgment.name
-    target_id = "LambdaECSForceRedeploy"
-    arn = var.judgment_lambda_arn
-}
-
-resource "aws_cloudwatch_event_target" "sns_from_primary_account_target_websockets" {
-    rule = aws_cloudwatch_event_rule.sns_from_primary_account_websockets.name
-    target_id = "LambdaECSForceRedeploy"
-    arn = var.websockets_lambda_arn
-}
-
-resource "aws_cloudwatch_event_target" "sns_from_primary_account_target_run_eval_worker" {
-    rule = aws_cloudwatch_event_rule.sns_from_primary_account_run_eval_worker.name
-    target_id = "LambdaECSForceRedeploy"
-    arn = var.run_eval_worker_lambda_arn
 }
