@@ -1,5 +1,6 @@
 import json
 import boto3
+import os
 
 def lambda_handler(event, context):
     ecs = boto3.client('ecs')
@@ -11,16 +12,16 @@ def lambda_handler(event, context):
 
     # Map repo names to ECS services
     repo_to_service = {
-        "judgement": "JudgmentBackendServer",
-        "judgment-websockets": "JudgmentWebSocketServer",
-        "run-eval-worker": "RunEvalWorker"
+        os.getenv("JUDGMENT_REPO", "judgement"): os.getenv("JUDGMENT_SERVICE", "JudgmentBackendServer"),
+        os.getenv("JUDGMENT_WEBSOCKETS_REPO", "judgment-websockets"): os.getenv("JUDGMENT_WEBSOCKETS_SERVICE", "JudgmentWebSocketServer"),
+        os.getenv("RUN_EVAL_WORKER_REPO", "run-eval-worker"): os.getenv("RUN_EVAL_WORKER_SERVICE", "RunEvalWorker")
     }
 
     service_name = repo_to_service.get(repo_name)
 
     if service_name:
         response = ecs.update_service(
-            cluster='judgmentlabs',
+            cluster=os.getenv("ECR_CLUSTER_NAME", "judgmentlabs"),
             service=service_name,
             forceNewDeployment=True
         )

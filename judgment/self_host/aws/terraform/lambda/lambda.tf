@@ -19,4 +19,15 @@ resource "aws_lambda_function" "force_redeploy_judgment" {
   handler          = "force_redeploy.lambda_handler"
   runtime          = "python3.11"
   source_code_hash = filebase64sha256("${path.module}/force_redeploy.zip")
+  environment {
+    variables = {
+      ECR_CLUSTER_NAME = "judgmentlabs"
+      JUDGMENT_REPO = "judgement"
+      JUDGMENT_WEBSOCKETS_REPO = "judgment-websockets"
+      RUN_EVAL_WORKER_REPO = "run-eval-worker"
+      JUDGMENT_SERVICE = "JudgmentBackendServer"
+      JUDGMENT_WEBSOCKETS_SERVICE = "JudgmentWebSocketServer"
+      RUN_EVAL_WORKER_SERVICE = "RunEvalWorker"
+    }
+  }
 }
