@@ -19,6 +19,13 @@ CREATE EXTENSION IF NOT EXISTS "timescaledb" WITH SCHEMA "extensions";
 
 
 
+CREATE EXTENSION IF NOT EXISTS "pg_net" WITH SCHEMA "extensions";
+
+
+
+
+
+
 CREATE EXTENSION IF NOT EXISTS "pgsodium";
 
 
@@ -95,7 +102,9 @@ ALTER TYPE "public"."experiment" OWNER TO "postgres";
 
 CREATE TYPE "public"."role" AS ENUM (
     'admin',
-    'developer'
+    'developer',
+    'owner',
+    'viewer'
 );
 
 
@@ -202,6 +211,106 @@ $$;
 
 
 ALTER FUNCTION "public"."backfill_token_usage_from_traces"("days_back" integer, "batch_size" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."batch_update_trace_metadata"("trace_ids_array" "uuid"[], "metadata_json" "jsonb") RETURNS TABLE("trace_id" "uuid", "updated_at" timestamp with time zone)
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  UPDATE traces
+  SET 
+    metadata = metadata_json,
+    updated_at = NOW()
+  WHERE trace_id = ANY(trace_ids_array)
+  RETURNING trace_id, updated_at;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."batch_update_trace_metadata"("trace_ids_array" "uuid"[], "metadata_json" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."calculate_percentiles"("p_values" numeric[]) RETURNS "json"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  sorted_values NUMERIC[];
+  n INTEGER;
+  result JSON;
+BEGIN
+  -- Handle empty array
+  IF p_values IS NULL OR array_length(p_values, 1) IS NULL THEN
+    RETURN json_build_object(
+      'p1', 0, 'p25', 0, 'p50', 0, 'p75', 0, 'p95', 0, 'p99', 0,
+      'min', 0, 'max', 0, 'avg', 0
+    );
+  END IF;
+  
+  -- Sort values
+  SELECT array_agg(v ORDER BY v) INTO sorted_values FROM unnest(p_values) AS v;
+  SELECT array_length(sorted_values, 1) INTO n;
+  
+  -- Calculate percentiles
+  SELECT json_build_object(
+    'p1', sorted_values[GREATEST(1, FLOOR(n * 0.01)::int)],
+    'p25', sorted_values[GREATEST(1, FLOOR(n * 0.25)::int)],
+    'p50', sorted_values[GREATEST(1, FLOOR(n * 0.50)::int)],
+    'p75', sorted_values[GREATEST(1, FLOOR(n * 0.75)::int)],
+    'p95', sorted_values[GREATEST(1, FLOOR(n * 0.95)::int)],
+    'p99', sorted_values[GREATEST(1, FLOOR(n * 0.99)::int)],
+    'min', sorted_values[1],
+    'max', sorted_values[n],
+    'avg', (SELECT AVG(v) FROM unnest(sorted_values) AS v)
+  ) INTO result;
+  
+  RETURN result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."calculate_percentiles"("p_values" numeric[]) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."calculate_percentiles"("p_values" "anyarray") RETURNS "json"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  sorted_values NUMERIC[];
+  n INTEGER;
+  result JSON;
+BEGIN
+  -- Handle empty array
+  IF p_values IS NULL OR array_length(p_values, 1) IS NULL THEN
+    RETURN json_build_object(
+      'p1', 0, 'p25', 0, 'p50', 0, 'p75', 0, 'p95', 0, 'p99', 0,
+      'min', 0, 'max', 0, 'avg', 0
+    );
+  END IF;
+  
+  -- Convert input array to numeric array and sort values
+  SELECT array_agg(v::NUMERIC ORDER BY v::NUMERIC) INTO sorted_values FROM unnest(p_values) AS v;
+  SELECT array_length(sorted_values, 1) INTO n;
+  
+  -- Calculate percentiles
+  SELECT json_build_object(
+    'p1', sorted_values[GREATEST(1, FLOOR(n * 0.01)::int)],
+    'p25', sorted_values[GREATEST(1, FLOOR(n * 0.25)::int)],
+    'p50', sorted_values[GREATEST(1, FLOOR(n * 0.50)::int)],
+    'p75', sorted_values[GREATEST(1, FLOOR(n * 0.75)::int)],
+    'p95', sorted_values[GREATEST(1, FLOOR(n * 0.95)::int)],
+    'p99', sorted_values[GREATEST(1, FLOOR(n * 0.99)::int)],
+    'min', sorted_values[1],
+    'max', sorted_values[n],
+    'avg', (SELECT AVG(v) FROM unnest(sorted_values) AS v)
+  ) INTO result;
+  
+  RETURN result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."calculate_percentiles"("p_values" "anyarray") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."check_and_reset_organizations"("days_between_resets" integer DEFAULT 30) RETURNS TABLE("organization_id" "uuid", "was_reset" boolean)
@@ -436,6 +545,44 @@ $_$;
 ALTER FUNCTION "public"."decrement_user_org_traces_ran"("user_id" "uuid", "organization_id" "uuid", "decrement_by" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."fetch_detailed_trace_errors_by_projects"("project_ids_array" "uuid"[], "start_date" timestamp with time zone DEFAULT NULL::timestamp with time zone, "end_date" timestamp with time zone DEFAULT NULL::timestamp with time zone, "limit_results" integer DEFAULT 1000) RETURNS TABLE("project_id" "uuid", "project_name" "text", "trace_id" "uuid", "trace_name" "text", "span_id" "uuid", "error" "jsonb", "error_type" "text", "error_message" "text", "error_traceback" "text", "created_at" timestamp with time zone, "span_type" "text", "function_name" "text")
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.project_id,
+        p.project_name,
+        t.trace_id,
+        t.name as trace_name,
+        ts.span_id,
+        ts.error,
+        -- Extract error type (simple approach)
+        COALESCE(ts.error->>'type', 'Unknown') as error_type,
+        -- Extract error message (simple approach)
+        COALESCE(ts.error->>'message', 'No message available') as error_message,
+        -- Extract traceback (simple approach - just convert to text)
+        COALESCE(ts.error->>'traceback', '') as error_traceback,
+        ts.created_at,
+        ts.span_type,
+        ts.function as function_name
+    FROM projects p
+    JOIN traces t ON p.project_id = t.project_id
+    JOIN trace_spans ts ON t.trace_id = ts.trace_id
+    WHERE 
+        p.project_id = ANY(project_ids_array)
+        AND ts.error IS NOT NULL
+        AND (start_date IS NULL OR ts.created_at >= start_date)
+        AND (end_date IS NULL OR ts.created_at <= end_date)
+    ORDER BY ts.created_at DESC
+    LIMIT limit_results;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."fetch_detailed_trace_errors_by_projects"("project_ids_array" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone, "limit_results" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_auth_users"("user_ids" "uuid"[]) RETURNS TABLE("id" "uuid", "email" "text")
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -452,6 +599,128 @@ $$;
 ALTER FUNCTION "public"."get_auth_users"("user_ids" "uuid"[]) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."get_customer_usage_metrics"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") RETURNS TABLE("customer_id" "text", "customer_name" "text", "total_tokens" bigint, "prompt_tokens" bigint, "completion_tokens" bigint, "total_cost" numeric, "trace_count" bigint, "last_activity" timestamp with time zone)
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    RETURN QUERY
+    WITH customer_traces AS (
+        SELECT 
+            t.customer_id,
+            t.trace_id,
+            t.created_at,
+            t.aggregate_token_usage
+        FROM traces t
+        WHERE t.project_id = ANY(project_ids_array)
+            AND t.created_at >= start_date_iso::timestamp with time zone
+            AND t.created_at <= end_date_iso::timestamp with time zone
+            AND t.customer_id IS NOT NULL
+            AND t.customer_id != ''
+    ),
+    customer_aggregates AS (
+        SELECT 
+            ct.customer_id,
+            NULL::TEXT as customer_name, -- We don't have customer names in traces table
+            COALESCE(SUM((ct.aggregate_token_usage->>'total_tokens')::bigint), 0) as total_tokens,
+            COALESCE(SUM((ct.aggregate_token_usage->>'prompt_tokens')::bigint), 0) as prompt_tokens,
+            COALESCE(SUM((ct.aggregate_token_usage->>'completion_tokens')::bigint), 0) as completion_tokens,
+            COALESCE(SUM((ct.aggregate_token_usage->>'total_cost_usd')::numeric), 0) as total_cost,
+            COUNT(ct.trace_id) as trace_count,
+            MAX(ct.created_at) as last_activity
+        FROM customer_traces ct
+        WHERE ct.aggregate_token_usage IS NOT NULL
+        GROUP BY ct.customer_id
+    )
+    SELECT 
+        ca.customer_id,
+        ca.customer_name,
+        ca.total_tokens,
+        ca.prompt_tokens,
+        ca.completion_tokens,
+        ca.total_cost,
+        ca.trace_count,
+        ca.last_activity
+    FROM customer_aggregates ca
+    WHERE ca.total_tokens > 0 OR ca.total_cost > 0
+    ORDER BY ca.total_cost DESC, ca.total_tokens DESC;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_customer_usage_metrics"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_dashboard_summary"("p_organization_id" "uuid", "p_time_range" "text" DEFAULT '7d'::"text", "p_project_name" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_start_date TIMESTAMP WITH TIME ZONE;
+  v_project_ids UUID[];
+  v_result JSONB;
+BEGIN
+  -- Get start date from time range
+  v_start_date := get_start_date_from_time_range(p_time_range);
+  
+  -- Get project IDs for the organization
+  SELECT get_project_ids_for_org(p_organization_id, p_project_name) INTO v_project_ids;
+  
+  -- Return empty result if no projects found
+  IF v_project_ids IS NULL OR array_length(v_project_ids, 1) = 0 THEN
+    RETURN '{}'::JSONB;
+  END IF;
+  
+  -- Calculate summary metrics
+  WITH trace_data AS (
+    SELECT
+      t.trace_id,
+      t.created_at,
+      COALESCE(t.duration, 0) AS duration,
+      COALESCE((t.token_counts->>'prompt_tokens')::FLOAT, 0) AS prompt_tokens,
+      COALESCE((t.token_counts->>'completion_tokens')::FLOAT, 0) AS completion_tokens,
+      COALESCE((t.token_counts->>'total_tokens')::FLOAT, 0) AS total_tokens,
+      0.0 AS cost, -- Placeholder since cost column doesn't exist
+      0 AS error_count, -- Placeholder since error_count column doesn't exist
+      0 AS tool_calls_count -- Placeholder since tool_calls_count column doesn't exist
+    FROM traces t
+    WHERE t.project_id = ANY(v_project_ids)
+      AND t.created_at >= v_start_date
+  )
+  SELECT jsonb_build_object(
+    'totalTokens', COALESCE(SUM(total_tokens), 0),
+    'totalCost', COALESCE(SUM(cost), 0),
+    'totalTraces', COUNT(trace_id),
+    'totalErrors', COALESCE(SUM(error_count), 0),
+    'promptTokens', COALESCE(SUM(prompt_tokens), 0),
+    'completionTokens', COALESCE(SUM(completion_tokens), 0),
+    'averageTokensPerRun', CASE WHEN COUNT(trace_id) > 0 THEN COALESCE(SUM(total_tokens) / COUNT(trace_id), 0) ELSE 0 END,
+    'averageCostPerRun', CASE WHEN COUNT(trace_id) > 0 THEN COALESCE(SUM(cost) / COUNT(trace_id), 0) ELSE 0 END,
+    'averageToolCallsPerRun', CASE WHEN COUNT(trace_id) > 0 THEN COALESCE(SUM(tool_calls_count) / COUNT(trace_id), 0) ELSE 0 END
+  ) INTO v_result
+  FROM trace_data;
+  
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_dashboard_summary"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid") RETURNS TABLE("dataset_alias" "text", "is_sequence" boolean)
+    LANGUAGE "sql"
+    AS $$
+    SELECT 
+        d.dataset_alias,
+        d.is_sequence
+    FROM datasets d
+    JOIN project_datasets pd ON d.dataset_id = pd.dataset_id
+    WHERE pd.project_id = input_project_id;
+$$;
+
+
+ALTER FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) RETURNS TABLE("dataset_alias" "text")
     LANGUAGE "sql"
     AS $$
@@ -464,6 +733,21 @@ $$;
 
 
 ALTER FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_dataset_aliases_by_project_and_trace"("input_project_id" "uuid") RETURNS TABLE("dataset_alias" "text", "is_trace" boolean)
+    LANGUAGE "sql"
+    AS $$
+    SELECT 
+        d.dataset_alias,
+        d.is_trace
+    FROM datasets d
+    JOIN project_datasets pd ON d.dataset_id = pd.dataset_id
+    WHERE pd.project_id = input_project_id;
+$$;
+
+
+ALTER FUNCTION "public"."get_dataset_aliases_by_project_and_trace"("input_project_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_dataset_sequence"("input_project_id" "uuid", "input_dataset_alias" "text", "input_root_sequence_id" "uuid") RETURNS SETOF "record"
@@ -487,22 +771,25 @@ $$;
 ALTER FUNCTION "public"."get_dataset_sequence"("input_project_id" "uuid", "input_dataset_alias" "text", "input_root_sequence_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_dataset_stats"("input_dataset_id" "uuid") RETURNS TABLE("created_at" timestamp with time zone, "updated_at" timestamp with time zone, "example_count" integer, "sequence_count" integer, "is_sequence" boolean)
+CREATE OR REPLACE FUNCTION "public"."get_dataset_stats"("input_dataset_id" "uuid") RETURNS TABLE("created_at" timestamp with time zone, "updated_at" timestamp with time zone, "example_count" integer, "trace_count" integer, "is_trace" boolean)
     LANGUAGE "plpgsql"
     AS $$BEGIN
     RETURN QUERY
     SELECT
         MIN(d.created_at) AS created_at,
-        GREATEST(MAX(e.created_at), MIN(d.created_at)) AS updated_at,
+        GREATEST(
+            COALESCE(MAX(e.created_at), MIN(d.created_at)),
+            COALESCE(MAX(dt.created_at), MIN(d.created_at))
+        ) AS updated_at,
         COUNT(DISTINCT e.example_id)::INTEGER AS example_count,
-        COUNT(DISTINCT s.root_sequence_id)::INTEGER as sequence_count,
-        BOOL_OR(d.is_sequence) AS is_sequence
+        COUNT(DISTINCT dt.trace_id)::INTEGER AS trace_count,
+        BOOL_OR(d.is_trace) AS is_trace
     FROM 
         datasets d
     LEFT JOIN 
         examples e ON d.dataset_id = e.dataset_id
     LEFT JOIN 
-        sequences s ON d.dataset_id = s.dataset_id
+        dataset_traces dt ON d.dataset_id = dt.dataset_id
     WHERE
         d.dataset_id = input_dataset_id;
 END;$$;
@@ -542,40 +829,393 @@ $$;
 ALTER FUNCTION "public"."get_dataset_stats_by_project"("input_project_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) RETURNS TABLE("name" "text", "created_at" timestamp with time zone, "creator_name" "text", "example_count" integer, "scorers" "jsonb")
+CREATE OR REPLACE FUNCTION "public"."get_dataset_stats_by_project_v2"("input_project_id" "uuid") RETURNS TABLE("dataset_alias" "text", "created_at" timestamp with time zone, "updated_at" timestamp with time zone, "example_count" integer, "trace_count" integer, "is_trace" boolean)
+    LANGUAGE "plpgsql"
+    AS $$BEGIN
+    RETURN QUERY
+    SELECT
+        d.dataset_alias AS dataset_alias,
+        MIN(d.created_at) AS created_at,
+        GREATEST(
+            COALESCE(MAX(e.created_at), MIN(d.created_at)),
+            COALESCE(MAX(dt.created_at), MIN(d.created_at))
+        ) AS updated_at,
+        COUNT(DISTINCT e.example_id)::INTEGER AS example_count,
+        COUNT(DISTINCT dt.trace_id)::INTEGER AS trace_count,
+        BOOL_OR(d.is_trace) AS is_trace
+    FROM 
+        project_datasets pd
+    JOIN 
+        datasets d ON pd.dataset_id = d.dataset_id
+    LEFT JOIN 
+        examples e ON d.dataset_id = e.dataset_id
+    LEFT JOIN 
+        dataset_traces dt ON d.dataset_id = dt.dataset_id
+    WHERE
+        pd.project_id = input_project_id
+    GROUP BY 
+        d.dataset_alias, d.dataset_id;
+END;$$;
+
+
+ALTER FUNCTION "public"."get_dataset_stats_by_project_v2"("input_project_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_examples_for_experiment_run"("project_id_input" "uuid", "experiment_name_input" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql"
+    AS $$
+declare
+    result jsonb;
+begin
+    select to_jsonb(er) || jsonb_build_object(
+        'examples',
+        (
+            select jsonb_agg(example_with_scores order by example_with_scores->>'created_at')
+            from (
+                select to_jsonb(e) || jsonb_build_object(
+                    'scorer_data',
+                    (
+                        select jsonb_agg(to_jsonb(sd))
+                        from scorer_data sd
+                        where sd.example_id = e.example_id
+                    )
+                ) as example_with_scores
+                from examples e
+                where e.experiment_run_id = er.id
+            ) sub
+        )
+    )
+    into result
+    from experiment_runs er
+    where er.project_id = project_id_input
+      and er.name = experiment_name_input;
+
+    return result;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."get_examples_for_experiment_run"("project_id_input" "uuid", "experiment_name_input" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_experiment_runs_by_ids"("experiment_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") RETURNS TABLE("experiment_run_id" "uuid", "experiment_id" "uuid", "created_at" timestamp with time zone, "updated_at" timestamp with time zone, "metrics" "jsonb", "status" "text")
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    experiment_runs.experiment_run_id,
+    experiment_runs.experiment_id,
+    experiment_runs.created_at,
+    experiment_runs.updated_at,
+    experiment_runs.metrics,
+    experiment_runs.status
+  FROM experiment_runs
+  WHERE experiment_runs.experiment_id = ANY(experiment_ids_array)
+    AND experiment_runs.created_at >= start_date_iso::timestamp
+    AND experiment_runs.created_at <= end_date_iso::timestamp
+  ORDER BY experiment_runs.created_at DESC;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_experiment_runs_by_ids"("experiment_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) RETURNS TABLE("name" "text", "created_at" timestamp with time zone, "creator_name" "text", "is_sequence" boolean, "example_count" integer, "sequence_count" integer, "scorers" "jsonb")
     LANGUAGE "sql"
     AS $$
-    select
+    SELECT
         er.name,
         er.created_at,
-        ud.first_name || ' ' || ud.last_name as creator_name,
+        ud.first_name || ' ' || ud.last_name AS creator_name,
+        er.is_sequence,
+
+        -- Count examples linked to this experiment_run
         (
-            select count(*) from public.examples e
-            where e.experiment_run_id = er.id
-        ) as example_count,
+            SELECT COUNT(*)
+            FROM public.examples e
+            WHERE e.experiment_run_id = er.id
+        ) AS example_count,
+
+        -- Count root sequences (parent_sequence_id IS NULL)
         (
-            select jsonb_object_agg(sd_scores.name, sd_scores.scores_array)
-            from (
-                select
+            SELECT COUNT(*)
+            FROM public.sequences s
+            WHERE s.experiment_run_id = er.id
+              AND s.parent_sequence_id IS NULL
+        ) AS sequence_count,
+
+        -- Scorer data grouped by name across both examples and sequences
+        (
+            SELECT jsonb_object_agg(name, scores)
+            FROM (
+                SELECT
                     sd.name,
-                    jsonb_agg(sd.score) filter (where sd.score is not null) as scores_array
-                from public.scorer_data sd
-                where sd.example_id in (
-                    select e.example_id from public.examples e
-                    where e.experiment_run_id = er.id
+                    jsonb_agg(sd.score) FILTER (WHERE sd.score IS NOT NULL) AS scores
+                FROM public.scorer_data sd
+                WHERE sd.example_id IN (
+                    SELECT e.example_id
+                    FROM public.examples e
+                    WHERE e.experiment_run_id = er.id
                 )
-                group by sd.name
-            ) as sd_scores
-        ) as scorers
-    from public.experiment_runs er
-    join public.user_data ud on ud.id = er.user_id
-    where er.project_id = project_id_input
-      and er.created_at between start_timestamp_input and end_timestamp_input
-    order by er.created_at desc;
+                OR sd.sequence_id IN (
+                    SELECT s.sequence_id
+                    FROM public.sequences s
+                    WHERE s.experiment_run_id = er.id
+                     -- AND s.parent_sequence_id IS NULL -- comment this out because we still want scores for sub-sequences
+                )
+                GROUP BY sd.name
+            ) AS scorer_group
+        ) AS scorers
+
+    FROM public.experiment_runs er
+    JOIN public.user_data ud ON ud.id = er.user_id
+    WHERE er.project_id = project_id_input
+      AND er.created_at BETWEEN start_timestamp_input AND end_timestamp_input
+    ORDER BY er.created_at DESC;
 $$;
 
 
 ALTER FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_experiment_summaries_by_project_v2"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) RETURNS TABLE("name" "text", "created_at" timestamp with time zone, "creator_name" "text", "is_trace" boolean, "example_count" integer, "trace_count" integer, "scorers" "jsonb")
+    LANGUAGE "sql"
+    AS $$
+    SELECT
+        er.name,
+        er.created_at,
+        ud.first_name || ' ' || ud.last_name AS creator_name,
+        er.is_trace,
+
+        -- Count examples linked directly to this experiment_run
+        (
+            SELECT COUNT(*)
+            FROM public.examples e
+            WHERE e.experiment_run_id = er.id
+        ) AS example_count,
+
+        -- Count traces linked to this experiment_run
+        (
+            SELECT COUNT(*)
+            FROM public.traces t
+            WHERE t.experiment_run_id = er.id
+        ) AS trace_count,
+
+        -- Scorer data grouped by name across direct examples and traced examples
+        (
+            SELECT jsonb_object_agg(name, scores)
+            FROM (
+                SELECT
+                    sd.name,
+                    jsonb_agg(sd.score) FILTER (WHERE sd.score IS NOT NULL) AS scores
+                FROM public.scorer_data sd
+                LEFT JOIN public.examples e ON e.example_id = sd.example_id
+                LEFT JOIN public.trace_spans ts ON
+                    ts.span_id = COALESCE(e.trace_span_id, sd.trace_span_id)
+                LEFT JOIN public.traces t ON t.trace_id = ts.trace_id
+                WHERE 
+                    (e.experiment_run_id = er.id)
+                    OR (t.experiment_run_id = er.id)
+                GROUP BY sd.name
+            ) grouped_scores
+        ) AS scorers
+    FROM public.experiment_runs er
+    JOIN public.user_data ud ON ud.id = er.user_id
+    WHERE er.project_id = project_id_input
+      AND er.created_at BETWEEN start_timestamp_input AND end_timestamp_input
+    ORDER BY er.created_at DESC;
+$$;
+
+
+ALTER FUNCTION "public"."get_experiment_summaries_by_project_v2"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_experiment_summaries_by_project_v3"("project_id_input" "uuid", "start_timestamp_input" timestamp without time zone, "end_timestamp_input" timestamp without time zone) RETURNS TABLE("name" "text", "created_at" timestamp with time zone, "creator_name" "text", "is_trace" boolean, "example_count" integer, "trace_count" integer, "scorers" "jsonb")
+    LANGUAGE "sql"
+    AS $$
+  SELECT
+      er.name,
+      er.created_at,
+      ud.first_name || ' ' || ud.last_name AS creator_name,
+      er.is_trace,
+
+      -- Count examples linked directly to this experiment_run
+      (
+          SELECT COUNT(*)
+          FROM public.examples e
+          WHERE e.experiment_run_id = er.id
+      ) AS example_count,
+
+      -- Count traces linked to this experiment_run
+      (
+          SELECT COUNT(*)
+          FROM public.traces t
+          WHERE t.experiment_run_id = er.id
+      ) AS trace_count,
+
+      -- Scorer data grouped by name across direct examples and traced examples
+      (
+          SELECT jsonb_object_agg(name, scores)
+          FROM (
+              SELECT
+                  sd.name,
+                  jsonb_agg(
+                      jsonb_build_object(
+                          'score', sd.score,
+                          'success', sd.success
+                      )
+                  ) FILTER (WHERE sd.score IS NOT NULL OR sd.success IS NOT NULL) AS scores
+              FROM public.scorer_data sd
+              LEFT JOIN public.examples e ON e.example_id = sd.example_id
+              LEFT JOIN public.trace_spans ts ON
+                  ts.span_id = COALESCE(e.trace_span_id, sd.trace_span_id)
+              LEFT JOIN public.traces t ON t.trace_id = ts.trace_id
+              WHERE 
+                  (e.experiment_run_id = er.id)
+                  OR (t.experiment_run_id = er.id)
+              GROUP BY sd.name
+          ) grouped_scores
+      ) AS scorers
+
+  FROM public.experiment_runs er
+  JOIN public.user_data ud ON ud.id = er.user_id
+  WHERE er.project_id = project_id_input
+    AND er.created_at BETWEEN start_timestamp_input AND end_timestamp_input
+  ORDER BY er.created_at DESC;
+$$;
+
+
+ALTER FUNCTION "public"."get_experiment_summaries_by_project_v3"("project_id_input" "uuid", "start_timestamp_input" timestamp without time zone, "end_timestamp_input" timestamp without time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_experiment_summaries_by_project_v4"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) RETURNS TABLE("name" "text", "created_at" timestamp with time zone, "creator_name" "text", "is_trace" boolean, "example_count" bigint, "trace_count" bigint, "scorers" "jsonb")
+    LANGUAGE "sql" SECURITY DEFINER
+    AS $$
+    WITH experiment_runs AS (
+        SELECT
+            er.id,
+            er.name,
+            er.created_at,
+            ud.first_name || ' ' || ud.last_name AS creator_name,
+            er.is_trace
+        FROM public.experiment_runs er
+        JOIN public.user_data ud ON ud.id = er.user_id
+        WHERE er.project_id = project_id_input
+          AND er.created_at BETWEEN start_timestamp_input AND end_timestamp_input
+    ),
+    -- Get all scorer data with experiment run mapping in one pass
+    base_scorer_data AS (
+        SELECT
+            CASE 
+                WHEN e.experiment_run_id IS NOT NULL THEN e.experiment_run_id
+                WHEN t.experiment_run_id IS NOT NULL THEN t.experiment_run_id
+            END AS experiment_run_id,
+            sd.name AS scorer_name,
+            CASE 
+                WHEN t.trace_id IS NOT NULL THEN t.trace_id::text  -- Always use trace_id if available
+                WHEN e.example_id IS NOT NULL AND e.trace_span_id IS NULL THEN e.example_id::text  -- Only use example_id if not linked to trace
+                ELSE sd.example_id::text  -- Fallback
+            END AS unit_id,
+            sd.score,
+            sd.success
+        FROM public.scorer_data sd
+        LEFT JOIN public.examples e ON e.example_id = sd.example_id
+        LEFT JOIN public.trace_spans ts ON ts.span_id = COALESCE(e.trace_span_id, sd.trace_span_id)
+        LEFT JOIN public.traces t ON t.trace_id = ts.trace_id
+        WHERE (e.experiment_run_id IN (SELECT id FROM experiment_runs))
+           OR (t.experiment_run_id IN (SELECT id FROM experiment_runs))
+    ),
+    -- Aggregate scores by unit (example or trace)
+    aggregated_scores AS (
+        SELECT
+            experiment_run_id,
+            scorer_name,
+            unit_id,
+            AVG(score) AS avg_score,
+            CASE 
+                WHEN COUNT(CASE WHEN success IS NOT NULL THEN 1 END) = 0 THEN NULL
+                WHEN BOOL_AND(success) IS TRUE THEN TRUE
+                ELSE FALSE
+            END AS aggregated_success
+        FROM base_scorer_data
+        GROUP BY experiment_run_id, scorer_name, unit_id
+    ),
+    -- Get all unique units per experiment for proper indexing
+    experiment_units AS (
+        SELECT 
+            experiment_run_id,
+            unit_id,
+            ROW_NUMBER() OVER (PARTITION BY experiment_run_id ORDER BY unit_id) AS unit_index
+        FROM (
+            SELECT DISTINCT experiment_run_id, unit_id
+            FROM aggregated_scores
+        ) distinct_units
+    ),
+    -- Get all unique scorers per experiment
+    experiment_scorers AS (
+        SELECT DISTINCT experiment_run_id, scorer_name
+        FROM aggregated_scores
+    ),
+    -- Create complete matrix with null padding
+    complete_matrix AS (
+        SELECT 
+            eu.experiment_run_id,
+            es.scorer_name,
+            eu.unit_id,
+            eu.unit_index,
+            ags.avg_score,
+            ags.aggregated_success
+        FROM experiment_units eu
+        CROSS JOIN experiment_scorers es
+        LEFT JOIN aggregated_scores ags ON 
+            ags.experiment_run_id = eu.experiment_run_id
+            AND ags.unit_id = eu.unit_id 
+            AND ags.scorer_name = es.scorer_name
+        WHERE eu.experiment_run_id = es.experiment_run_id
+    ),
+    -- Build aligned scorer arrays
+    scorer_arrays AS (
+        SELECT 
+            experiment_run_id,
+            scorer_name,
+            jsonb_agg(
+                CASE 
+                    WHEN avg_score IS NOT NULL OR aggregated_success IS NOT NULL 
+                    THEN jsonb_build_object('score', avg_score, 'success', aggregated_success)
+                    ELSE jsonb_build_object('score', null, 'success', null)
+                END 
+                ORDER BY unit_index
+            ) AS scores
+        FROM complete_matrix
+        GROUP BY experiment_run_id, scorer_name
+    ),
+    -- Build final scorer objects
+    final_scorers AS (
+        SELECT 
+            experiment_run_id,
+            jsonb_object_agg(scorer_name, scores) AS scorers
+        FROM scorer_arrays
+        GROUP BY experiment_run_id
+    )
+    SELECT
+        er.name,
+        er.created_at,
+        er.creator_name,
+        er.is_trace,
+        -- Count examples linked directly to this experiment_run
+        (SELECT COUNT(*) FROM public.examples e WHERE e.experiment_run_id = er.id) AS example_count,
+        -- Count traces linked to this experiment_run  
+        (SELECT COUNT(*) FROM public.traces t WHERE t.experiment_run_id = er.id) AS trace_count,
+        COALESCE(fs.scorers, '{}'::jsonb) AS scorers
+    FROM experiment_runs er
+    LEFT JOIN final_scorers fs ON fs.experiment_run_id = er.id
+    ORDER BY er.created_at DESC;
+$$;
+
+
+ALTER FUNCTION "public"."get_experiment_summaries_by_project_v4"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") RETURNS SETOF "public"."experiment"
@@ -642,6 +1282,156 @@ $$;
 ALTER FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."get_latency_metrics"("p_organization_id" "uuid", "p_time_range" "text" DEFAULT '7d'::"text", "p_project_name" "text" DEFAULT NULL::"text") RETURNS "json"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_start_date TIMESTAMP WITH TIME ZONE;
+  v_project_ids UUID[];
+  v_result JSON;
+BEGIN
+  -- Get start date from time range
+  v_start_date := get_start_date_from_time_range(p_time_range);
+  
+  -- Get project IDs for the organization
+  SELECT get_project_ids_for_org(p_organization_id, p_project_name) INTO v_project_ids;
+  
+  -- Return empty result if no projects found
+  IF v_project_ids IS NULL OR array_length(v_project_ids, 1) = 0 THEN
+    RETURN json_build_object(
+      'trace_latency', '[]'::json,
+      'llm_latency', '[]'::json,
+      'tool_latency', '[]'::json,
+      'trace_percentiles', '{}'::json,
+      'llm_percentiles', '{}'::json,
+      'tool_percentiles', '{}'::json
+    );
+  END IF;
+  
+  -- Get trace latency data
+  WITH trace_data AS (
+    SELECT
+      t.trace_id,
+      t.created_at,
+      t.duration * 1000 AS latency, -- Multiply by 1000 for frontend display
+      p.project_name
+    FROM traces t
+    JOIN projects p ON t.project_id = p.project_id
+    WHERE t.project_id = ANY(v_project_ids)
+      AND t.created_at >= v_start_date
+      AND t.duration IS NOT NULL
+    ORDER BY t.created_at
+    LIMIT 10000 -- Set a high limit to effectively get all data
+  ),
+  llm_data AS (
+    SELECT
+      ts.trace_id,
+      ts.created_at,
+      ts.duration * 1000 AS latency, -- Multiply by 1000 for frontend display
+      COALESCE(ts.function, 'Unknown') AS function
+    FROM trace_spans ts
+    JOIN traces t ON ts.trace_id = t.trace_id
+    WHERE t.project_id = ANY(v_project_ids)
+      AND ts.created_at >= v_start_date
+      AND ts.span_type = 'llm'
+      AND ts.duration IS NOT NULL
+    ORDER BY ts.created_at
+    LIMIT 10000 -- Set a high limit to effectively get all data
+  ),
+  tool_data AS (
+    SELECT
+      ts.trace_id,
+      ts.created_at,
+      ts.duration * 1000 AS latency, -- Multiply by 1000 for frontend display
+      ts.span_type AS tool_type,
+      COALESCE(ts.function, 'Unknown') AS function
+    FROM trace_spans ts
+    JOIN traces t ON ts.trace_id = t.trace_id
+    WHERE t.project_id = ANY(v_project_ids)
+      AND ts.created_at >= v_start_date
+      AND ts.span_type = 'tool'
+      AND ts.duration IS NOT NULL
+    ORDER BY ts.created_at
+    LIMIT 10000 -- Set a high limit to effectively get all data
+  ),
+  trace_durations AS (
+    SELECT array_agg(latency) AS values FROM trace_data
+  ),
+  llm_durations AS (
+    SELECT array_agg(latency) AS values FROM llm_data
+  ),
+  tool_types AS (
+    SELECT DISTINCT tool_type FROM tool_data
+  ),
+  tool_percentiles AS (
+    SELECT
+      tt.tool_type,
+      calculate_percentiles(ARRAY(
+        SELECT td.latency
+        FROM tool_data td
+        WHERE td.tool_type = tt.tool_type
+      )) AS percentiles
+    FROM tool_types tt
+  )
+  
+  SELECT json_build_object(
+    'trace_latency', COALESCE((
+      SELECT json_agg(
+        json_build_object(
+          'timestamp', created_at,
+          'latency', latency,
+          'trace_id', trace_id,
+          'project_name', project_name
+        )
+      )
+      FROM trace_data
+    ), '[]'::json),
+    'llm_latency', COALESCE((
+      SELECT json_agg(
+        json_build_object(
+          'timestamp', created_at,
+          'latency', latency,
+          'trace_id', trace_id,
+          'function', function
+        )
+      )
+      FROM llm_data
+    ), '[]'::json),
+    'tool_latency', COALESCE((
+      SELECT json_agg(
+        json_build_object(
+          'timestamp', created_at,
+          'latency', latency,
+          'trace_id', trace_id,
+          'tool_type', tool_type,
+          'function', function
+        )
+      )
+      FROM tool_data
+    ), '[]'::json),
+    'trace_percentiles', COALESCE((
+      SELECT calculate_percentiles(values) FROM trace_durations
+    ), '{}'::json),
+    'llm_percentiles', COALESCE((
+      SELECT calculate_percentiles(values) FROM llm_durations
+    ), '{}'::json),
+    'tool_percentiles', COALESCE((
+      SELECT json_object_agg(
+        tool_type,
+        percentiles
+      )
+      FROM tool_percentiles
+    ), '{}'::json)
+  ) INTO v_result;
+  
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_latency_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid") RETURNS TABLE("eval_result_run" "text")
     LANGUAGE "sql"
     AS $$
@@ -670,6 +1460,177 @@ $$;
 
 
 ALTER FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "run_limit" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_llm_span_details"("trace_ids_array" "uuid"[], "start_date_iso" "text") RETURNS TABLE("inputs" "jsonb", "span_id" "uuid", "created_at" timestamp with time zone)
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    trace_spans.inputs,
+    trace_spans.span_id,
+    trace_spans.created_at
+  FROM trace_spans
+  WHERE trace_id = ANY(trace_ids_array)
+    AND span_type = 'llm'
+    AND trace_spans.created_at >= start_date_iso::timestamp
+  ORDER BY trace_spans.created_at ASC;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_llm_span_details"("trace_ids_array" "uuid"[], "start_date_iso" "text") OWNER TO "postgres";
+
+SET default_tablespace = '';
+
+SET default_table_access_method = "heap";
+
+
+CREATE TABLE IF NOT EXISTS "public"."trace_spans" (
+    "span_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "parent_span_id" "uuid",
+    "created_at" timestamp with time zone,
+    "function" "text",
+    "depth" integer,
+    "span_type" "text",
+    "inputs" "jsonb",
+    "output" "jsonb",
+    "duration" double precision,
+    "trace_id" "uuid",
+    "annotation" "jsonb",
+    "additional_metadata" "jsonb",
+    "agent_name" "text",
+    "error" "jsonb",
+    "expected_tools" "jsonb",
+    "has_evaluation" boolean DEFAULT false NOT NULL,
+    "state_after" "jsonb",
+    "state_before" "jsonb"
+);
+
+
+ALTER TABLE "public"."trace_spans" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_llm_spans_by_trace_ids"("trace_ids_array" "uuid"[], "start_date_iso" "text", "span_type_filter" "text") RETURNS SETOF "public"."trace_spans"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT *
+  FROM trace_spans
+  WHERE trace_id = ANY(trace_ids_array)
+    AND span_type = span_type_filter
+    AND trace_spans.created_at >= start_date_iso::timestamp;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_llm_spans_by_trace_ids"("trace_ids_array" "uuid"[], "start_date_iso" "text", "span_type_filter" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_llm_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text" DEFAULT '7d'::"text", "p_project_name" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_start_date TIMESTAMP WITH TIME ZONE;
+  v_project_ids UUID[];
+  v_result JSONB;
+BEGIN
+  -- Get start date from time range
+  v_start_date := get_start_date_from_time_range(p_time_range);
+  
+  -- Get project IDs for the organization
+  SELECT get_project_ids_for_org(p_organization_id, p_project_name) INTO v_project_ids;
+  
+  -- Return empty result if no projects found
+  IF v_project_ids IS NULL OR array_length(v_project_ids, 1) = 0 THEN
+    RETURN '{}'::JSONB;
+  END IF;
+  
+  -- Calculate LLM usage metrics
+  WITH llm_data AS (
+    SELECT
+      t.trace_id,
+      t.created_at,
+      COALESCE((t.token_counts->>'total_tokens')::FLOAT, 0) AS total_tokens,
+      0.0 AS cost, -- Placeholder since cost column doesn't exist
+      COALESCE((t.entries->>'model')::TEXT, 'unknown') AS model -- Extract model from entries JSONB
+    FROM traces t
+    WHERE t.project_id = ANY(v_project_ids)
+      AND t.created_at >= v_start_date
+  ),
+  daily_data AS (
+    SELECT
+      DATE_TRUNC('day', created_at) AS day,
+      SUM(total_tokens) AS tokens,
+      SUM(cost) AS cost
+    FROM llm_data
+    GROUP BY DATE_TRUNC('day', created_at)
+    ORDER BY DATE_TRUNC('day', created_at)
+  ),
+  hourly_data AS (
+    SELECT
+      DATE_TRUNC('hour', created_at) AS hour,
+      SUM(total_tokens) AS tokens,
+      SUM(cost) AS cost
+    FROM llm_data
+    GROUP BY DATE_TRUNC('hour', created_at)
+    ORDER BY DATE_TRUNC('hour', created_at)
+  ),
+  model_data AS (
+    SELECT
+      model,
+      COUNT(*) AS count,
+      SUM(total_tokens) AS tokens,
+      SUM(cost) AS cost
+    FROM llm_data
+    GROUP BY model
+    ORDER BY COUNT(*) DESC
+  )
+  SELECT jsonb_build_object(
+    'totalTokens', COALESCE(SUM(total_tokens), 0),
+    'totalCost', COALESCE(SUM(cost), 0),
+    'byDay', COALESCE(
+      (SELECT jsonb_agg(
+        jsonb_build_object(
+          'day', day,
+          'tokens', tokens,
+          'cost', cost
+        )
+      ) FROM daily_data),
+      '[]'::jsonb
+    ),
+    'byHour', COALESCE(
+      (SELECT jsonb_agg(
+        jsonb_build_object(
+          'hour', hour,
+          'tokens', tokens,
+          'cost', cost
+        )
+      ) FROM hourly_data),
+      '[]'::jsonb
+    ),
+    'models', COALESCE(
+      (SELECT jsonb_agg(
+        jsonb_build_object(
+          'model', model,
+          'count', count,
+          'tokens', tokens,
+          'cost', cost
+        )
+      ) FROM model_data),
+      '[]'::jsonb
+    )
+  ) INTO v_result
+  FROM llm_data;
+  
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_llm_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_organization_members"("org_id" "uuid") RETURNS TABLE("user_id" "uuid", "email" "text", "first_name" "text", "last_name" "text", "role" "text", "created_at" timestamp with time zone)
@@ -737,6 +1698,31 @@ $$;
 ALTER FUNCTION "public"."get_project_id"("input_project_name" "text", "input_organization_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."get_project_ids_for_org"("p_organization_id" "uuid", "p_project_name" "text" DEFAULT NULL::"text") RETURNS "uuid"[]
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  project_ids UUID[];
+BEGIN
+  IF p_project_name IS NULL THEN
+    SELECT array_agg(project_id) INTO project_ids
+    FROM projects
+    WHERE organization_id = p_organization_id;
+  ELSE
+    SELECT array_agg(project_id) INTO project_ids
+    FROM projects
+    WHERE organization_id = p_organization_id
+      AND project_name = p_project_name;
+  END IF;
+  
+  RETURN project_ids;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_project_ids_for_org"("p_organization_id" "uuid", "p_project_name" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid" DEFAULT NULL::"uuid") RETURNS TABLE("project_id" "uuid", "project_name" "text", "first_name" "text", "last_name" "text", "updated_at" timestamp with time zone, "total_eval_runs" integer, "total_traces" integer)
     LANGUAGE "plpgsql"
     AS $$BEGIN
@@ -799,6 +1785,125 @@ $$;
 ALTER FUNCTION "public"."get_project_summaries"("org_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."get_project_summaries_v2"("org_id" "uuid") RETURNS TABLE("project_id" "uuid", "project_name" "text", "first_name" "text", "last_name" "text", "updated_at" timestamp with time zone, "total_experiment_runs" integer, "total_traces" integer)
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.project_id,
+        p.project_name,
+        u.first_name,
+        u.last_name,
+        COALESCE(GREATEST(MAX(er.created_at), MAX(t.created_at)), p.created_at) AS updated_at,
+        COUNT(DISTINCT er.id)::INTEGER AS total_experiment_runs,
+        COUNT(DISTINCT t.trace_id) FILTER (WHERE t.offline_mode = FALSE)::INTEGER AS total_traces
+    FROM 
+        projects p
+    LEFT JOIN 
+        experiment_runs er ON p.project_id = er.project_id
+    LEFT JOIN 
+        traces t ON p.project_id = t.project_id
+    LEFT JOIN 
+        user_data u ON p.creator_id = u.id
+    WHERE 
+        p.organization_id = org_id
+    GROUP BY 
+        p.project_id, p.project_name, u.first_name, u.last_name;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_project_summaries_v2"("org_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_project_summaries_v3"("org_id" "uuid") RETURNS TABLE("project_id" "uuid", "project_name" "text", "first_name" "text", "last_name" "text", "updated_at" timestamp with time zone, "total_experiment_runs" integer, "total_datasets" integer, "total_traces" integer)
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.project_id,
+        p.project_name,
+        u.first_name,
+        u.last_name,
+        COALESCE(GREATEST(MAX(er.created_at), MAX(t.created_at)), p.created_at) AS updated_at,
+        COUNT(DISTINCT er.id)::INTEGER AS total_experiment_runs,
+        COUNT(DISTINCT pd.dataset_id)::INTEGER AS total_datasets,
+        COUNT(DISTINCT t.trace_id) FILTER (WHERE t.offline_mode = FALSE)::INTEGER AS total_traces
+    FROM 
+        projects p
+    LEFT JOIN 
+        experiment_runs er ON p.project_id = er.project_id
+    LEFT JOIN 
+        traces t ON p.project_id = t.project_id
+    LEFT JOIN 
+        user_data u ON p.creator_id = u.id
+    LEFT JOIN
+        project_datasets pd on p.project_id = pd.project_id
+    WHERE 
+        p.organization_id = org_id
+    GROUP BY 
+        p.project_id, p.project_name, u.first_name, u.last_name;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_project_summaries_v3"("org_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_project_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text" DEFAULT '7d'::"text", "p_project_name" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_start_date TIMESTAMP WITH TIME ZONE;
+  v_project_ids UUID[];
+  v_result JSONB;
+BEGIN
+  -- Get start date from time range
+  v_start_date := get_start_date_from_time_range(p_time_range);
+  
+  -- Get project IDs for the organization
+  SELECT get_project_ids_for_org(p_organization_id, p_project_name) INTO v_project_ids;
+  
+  -- Return empty result if no projects found
+  IF v_project_ids IS NULL OR array_length(v_project_ids, 1) = 0 THEN
+    RETURN '[]'::JSONB;
+  END IF;
+  
+  -- Calculate project usage metrics
+  WITH project_data AS (
+    SELECT
+      p.project_id,
+      p.project_name,
+      COUNT(t.trace_id) AS trace_count,
+      COALESCE(SUM((t.token_counts->>'total_tokens')::FLOAT), 0) AS total_tokens,
+      0.0 AS total_cost -- Placeholder since cost column doesn't exist
+    FROM projects p
+    LEFT JOIN traces t ON p.project_id = t.project_id AND t.created_at >= v_start_date
+    WHERE p.project_id = ANY(v_project_ids)
+    GROUP BY p.project_id, p.project_name
+    ORDER BY COUNT(t.trace_id) DESC
+  )
+  SELECT jsonb_agg(
+    jsonb_build_object(
+      'projectId', project_id,
+      'projectName', project_name,
+      'traceCount', trace_count,
+      'totalTokens', total_tokens,
+      'totalCost', total_cost
+    )
+  ) INTO v_result
+  FROM project_data;
+  
+  RETURN COALESCE(v_result, '[]'::JSONB);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_project_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_root_sequences_summary"("input_dataset_id" "uuid") RETURNS TABLE("root_sequence_id" "uuid", "root_sequence_name" "text", "latest_created_at" timestamp with time zone)
     LANGUAGE "sql"
     AS $$
@@ -831,6 +1936,225 @@ $$;
 
 
 ALTER FUNCTION "public"."get_slack_team_ids_for_user"("user_uuid" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_spans_by_trace_ids"("trace_ids" "uuid"[]) RETURNS TABLE("span_id" "uuid", "trace_id" "uuid", "span_type" "text", "created_at" timestamp with time zone, "inputs" "jsonb", "outputs" "jsonb", "function" "text")
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    ts.span_id,
+    ts.trace_id,
+    ts.span_type,
+    ts.created_at,
+    ts.inputs,
+    ts.outputs,
+    ts.function
+  FROM trace_spans ts
+  WHERE ts.trace_id = ANY(trace_ids)
+  AND ts.span_type = 'llm';
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_spans_by_trace_ids"("trace_ids" "uuid"[]) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_start_date_from_time_range"("p_time_range" "text") RETURNS timestamp with time zone
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_now TIMESTAMP WITH TIME ZONE := now();
+  v_start_date TIMESTAMP WITH TIME ZONE;
+BEGIN
+  CASE p_time_range
+    WHEN '1h' THEN
+      v_start_date := v_now - INTERVAL '1 hour';
+    WHEN '24h' THEN
+      v_start_date := v_now - INTERVAL '1 day';
+    WHEN '7d' THEN
+      v_start_date := v_now - INTERVAL '7 days';
+    WHEN '30d' THEN
+      v_start_date := v_now - INTERVAL '30 days';
+    WHEN 'all' THEN
+      v_start_date := v_now - INTERVAL '10 years'; -- Effectively "all time"
+    ELSE
+      v_start_date := v_now - INTERVAL '7 days'; -- Default to 7 days
+  END CASE;
+  
+  RETURN v_start_date;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_start_date_from_time_range"("p_time_range" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_token_breakdown_metrics"("p_organization_id" "uuid", "p_time_range" "text" DEFAULT '7d'::"text", "p_project_name" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_start_date TIMESTAMP WITH TIME ZONE;
+  v_project_ids UUID[];
+  v_result JSONB;
+BEGIN
+  -- Get start date from time range
+  v_start_date := get_start_date_from_time_range(p_time_range);
+  
+  -- Get project IDs for the organization
+  SELECT get_project_ids_for_org(p_organization_id, p_project_name) INTO v_project_ids;
+  
+  -- Return empty result if no projects found
+  IF v_project_ids IS NULL OR array_length(v_project_ids, 1) = 0 THEN
+    RETURN '{}'::JSONB;
+  END IF;
+  
+  -- Calculate token breakdown metrics
+  WITH token_data AS (
+    SELECT
+      t.trace_id,
+      t.created_at,
+      COALESCE((t.entries->>'model')::TEXT, 'unknown') AS model, -- Extract model from entries JSONB
+      COALESCE((t.token_counts->>'prompt_tokens')::FLOAT, 0) AS prompt_tokens,
+      COALESCE((t.token_counts->>'completion_tokens')::FLOAT, 0) AS completion_tokens,
+      COALESCE((t.token_counts->>'total_tokens')::FLOAT, 0) AS total_tokens,
+      0.0 AS cost -- Placeholder since cost column doesn't exist
+    FROM traces t
+    WHERE t.project_id = ANY(v_project_ids)
+      AND t.created_at >= v_start_date
+  ),
+  model_data AS (
+    SELECT
+      model,
+      SUM(prompt_tokens) AS prompt_tokens,
+      SUM(completion_tokens) AS completion_tokens,
+      SUM(total_tokens) AS total_tokens,
+      SUM(cost) AS cost
+    FROM token_data
+    GROUP BY model
+    ORDER BY SUM(total_tokens) DESC
+  ),
+  daily_data AS (
+    SELECT
+      DATE_TRUNC('day', created_at) AS day,
+      SUM(prompt_tokens) AS prompt_tokens,
+      SUM(completion_tokens) AS completion_tokens,
+      SUM(total_tokens) AS total_tokens,
+      SUM(cost) AS cost
+    FROM token_data
+    GROUP BY DATE_TRUNC('day', created_at)
+    ORDER BY DATE_TRUNC('day', created_at)
+  ),
+  summary_data AS (
+    SELECT
+      SUM(prompt_tokens) AS prompt_tokens,
+      SUM(completion_tokens) AS completion_tokens,
+      SUM(total_tokens) AS total_tokens,
+      SUM(cost) AS cost
+    FROM token_data
+  )
+  SELECT jsonb_build_object(
+    'byModel', COALESCE(
+      (SELECT jsonb_agg(
+        jsonb_build_object(
+          'model', model,
+          'promptTokens', prompt_tokens,
+          'completionTokens', completion_tokens,
+          'totalTokens', total_tokens,
+          'cost', cost
+        )
+      ) FROM model_data),
+      '[]'::jsonb
+    ),
+    'byDay', COALESCE(
+      (SELECT jsonb_agg(
+        jsonb_build_object(
+          'day', day,
+          'promptTokens', prompt_tokens,
+          'completionTokens', completion_tokens,
+          'totalTokens', total_tokens,
+          'cost', cost
+        )
+      ) FROM daily_data),
+      '[]'::jsonb
+    ),
+    'usedModels', COALESCE(
+      (SELECT jsonb_agg(DISTINCT model) FROM token_data),
+      '[]'::jsonb
+    ),
+    'summary', COALESCE(
+      (SELECT jsonb_build_object(
+        'promptTokens', prompt_tokens,
+        'completionTokens', completion_tokens,
+        'totalTokens', total_tokens,
+        'cost', cost
+      ) FROM summary_data),
+      '{}'::jsonb
+    )
+  ) INTO v_result;
+  
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_token_breakdown_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_token_usage_by_span_ids"("span_ids" "uuid"[]) RETURNS TABLE("id" "uuid", "trace_span_id" "uuid", "prompt_tokens" integer, "completion_tokens" integer, "total_tokens" integer, "model" "text", "created_at" timestamp with time zone)
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    tu.id,
+    tu.trace_span_id,
+    tu.prompt_tokens,
+    tu.completion_tokens,
+    tu.total_tokens,
+    tu.model,
+    tu.created_at
+  FROM token_usage tu
+  WHERE tu.trace_span_id = ANY(span_ids);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_token_usage_by_span_ids"("span_ids" "uuid"[]) OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."trace_span_token_usage" (
+    "trace_span_id" "uuid" NOT NULL,
+    "prompt_tokens" integer DEFAULT 0,
+    "completion_tokens" integer DEFAULT 0,
+    "total_tokens" integer DEFAULT 0,
+    "prompt_tokens_cost_usd" numeric(10,6) DEFAULT 0,
+    "completion_tokens_cost_usd" numeric(10,6) DEFAULT 0,
+    "total_cost_usd" numeric(10,6) DEFAULT 0,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "model_name" "text"
+);
+
+
+ALTER TABLE "public"."trace_span_token_usage" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_token_usage_for_spans"("span_ids_array" "uuid"[], "start_date_iso" "text") RETURNS SETOF "public"."trace_span_token_usage"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT *
+  FROM trace_span_token_usage
+  WHERE trace_span_id = ANY(span_ids_array)
+    AND trace_span_token_usage.created_at >= start_date_iso::timestamp
+  ORDER BY trace_span_token_usage.created_at ASC;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_token_usage_for_spans"("span_ids_array" "uuid"[], "start_date_iso" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_tokens_for_user"("user_id" "uuid") RETURNS "json"
@@ -877,6 +2201,106 @@ $$;
 
 
 ALTER FUNCTION "public"."get_tokens_for_user"("user_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_tool_spans_by_trace_ids"("trace_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) RETURNS TABLE("span_id" "uuid", "span_type" "text", "created_at" timestamp with time zone, "trace_id" "uuid", "function" "text")
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    ts.span_id,
+    ts.span_type,
+    ts.created_at,
+    ts.trace_id,
+    ts.function
+  FROM trace_spans ts
+  WHERE ts.trace_id = ANY(trace_ids)
+  AND ts.span_type = 'tool'
+  AND ts.created_at >= start_date
+  AND ts.created_at <= end_date;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_tool_spans_by_trace_ids"("trace_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_tool_usage_for_traces"("trace_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") RETURNS TABLE("span_id" "uuid", "span_type" "text", "created_at" timestamp with time zone, "trace_id" "uuid", "function" "text")
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    trace_spans.span_id,
+    trace_spans.span_type,
+    trace_spans.created_at,
+    trace_spans.trace_id,
+    trace_spans.function
+  FROM trace_spans
+  WHERE trace_spans.trace_id = ANY(trace_ids_array)
+    AND trace_spans.span_type = 'tool'
+    AND trace_spans.created_at >= start_date_iso::timestamp
+    AND trace_spans.created_at <= end_date_iso::timestamp;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_tool_usage_for_traces"("trace_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_tool_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text" DEFAULT '7d'::"text", "p_project_name" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_start_date TIMESTAMP WITH TIME ZONE;
+  v_project_ids UUID[];
+  v_result JSONB;
+BEGIN
+  -- Get start date from time range
+  v_start_date := get_start_date_from_time_range(p_time_range);
+  
+  -- Get project IDs for the organization
+  SELECT get_project_ids_for_org(p_organization_id, p_project_name) INTO v_project_ids;
+  
+  -- Return empty result if no projects found
+  IF v_project_ids IS NULL OR array_length(v_project_ids, 1) = 0 THEN
+    RETURN '[]'::JSONB;
+  END IF;
+  
+  -- Calculate tool usage metrics
+  WITH tool_data AS (
+    SELECT
+      ts.function AS tool_name,
+      COUNT(*) AS call_count,
+      AVG(ts.duration) * 1000 AS avg_latency,
+      0 AS error_count -- Using 0 as placeholder since error column doesn't exist
+    FROM trace_spans ts
+    JOIN traces t ON ts.trace_id = t.trace_id
+    WHERE t.project_id = ANY(v_project_ids)
+      AND ts.created_at >= v_start_date
+      AND ts.span_type = 'tool'
+      AND ts.function IS NOT NULL
+    GROUP BY ts.function
+    ORDER BY COUNT(*) DESC
+  )
+  SELECT jsonb_agg(
+    jsonb_build_object(
+      'toolName', tool_name,
+      'callCount', call_count,
+      'avgLatency', avg_latency,
+      'errorCount', error_count,
+      'errorRate', CASE WHEN call_count > 0 THEN (error_count::float / call_count) * 100 ELSE 0 END
+    )
+  ) INTO v_result
+  FROM tool_data;
+  
+  RETURN COALESCE(v_result, '[]'::JSONB);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_tool_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_trace_aggregates"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) RETURNS "jsonb"
@@ -948,6 +2372,35 @@ $$;
 ALTER FUNCTION "public"."get_trace_aggregates"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."get_trace_spans_paginated"("trace_ids_array" "uuid"[], "span_type_filter" "text" DEFAULT NULL::"text", "start_date_iso" "text" DEFAULT NULL::"text", "limit_val" integer DEFAULT 1000, "offset_val" integer DEFAULT 0) RETURNS TABLE("span_id" "uuid", "trace_id" "uuid", "span_type" "text", "name" "text", "created_at" timestamp with time zone, "duration" double precision, "function" "text", "inputs" "jsonb", "outputs" "jsonb")
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    trace_spans.span_id,
+    trace_spans.trace_id,
+    trace_spans.span_type,
+    trace_spans.name,
+    trace_spans.created_at,
+    trace_spans.duration,
+    trace_spans.function,
+    trace_spans.inputs,
+    trace_spans.outputs
+  FROM trace_spans
+  WHERE trace_spans.trace_id = ANY(trace_ids_array)
+    AND (span_type_filter IS NULL OR trace_spans.span_type = span_type_filter)
+    AND (start_date_iso IS NULL OR trace_spans.created_at >= start_date_iso::timestamp)
+  ORDER BY trace_spans.created_at ASC
+  LIMIT limit_val
+  OFFSET offset_val;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_trace_spans_paginated"("trace_ids_array" "uuid"[], "span_type_filter" "text", "start_date_iso" "text", "limit_val" integer, "offset_val" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) RETURNS "jsonb"
     LANGUAGE "plpgsql"
     AS $$
@@ -992,6 +2445,307 @@ $$;
 ALTER FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."get_trace_summaries_by_project_v2"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) RETURNS "jsonb"
+    LANGUAGE "plpgsql"
+    AS $$DECLARE
+    result_json JSONB;
+BEGIN
+    SELECT jsonb_agg(trace_info) INTO result_json
+    FROM (
+        SELECT
+            t.trace_id,
+            t.name AS trace_name,
+            t.duration AS latency,
+            t.created_at AS timestamp,
+            t.has_notification,
+            t.aggregate_token_usage,
+            COALESCE(ud.first_name, 'Judgment') || ' ' || COALESCE(ud.last_name, 'Customer') AS creator,
+            (
+                SELECT jsonb_object_agg(sc.name, sc.raw_scores)
+                FROM (
+                    SELECT
+                        sd.name,
+                        jsonb_agg(sd.score) FILTER (WHERE sd.score IS NOT NULL) AS raw_scores
+                    FROM trace_spans ts
+                    JOIN examples e ON e.trace_span_id = ts.span_id
+                    JOIN scorer_data sd ON sd.example_id = e.example_id
+                    WHERE ts.trace_id = t.trace_id
+                    GROUP BY sd.name
+                ) sc
+            ) AS scores
+        FROM traces t
+        JOIN user_data ud ON t.user_id = ud.id
+        WHERE t.offline_mode = FALSE
+          AND t.project_id = input_project_id
+          AND t.created_at BETWEEN start_time AND end_time
+        ORDER BY t.created_at DESC
+    ) AS trace_info;
+
+    RETURN result_json;
+END;$$;
+
+
+ALTER FUNCTION "public"."get_trace_summaries_by_project_v2"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_trace_summaries_by_project_v3"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) RETURNS "jsonb"
+    LANGUAGE "plpgsql"
+    AS $$
+DECLARE
+    result_json JSONB;
+BEGIN
+    SELECT jsonb_agg(trace_info) INTO result_json
+    FROM (
+        SELECT
+            t.trace_id,
+            t.name AS trace_name,
+            t.duration AS latency,
+            t.created_at AS timestamp,
+            t.has_notification,
+            t.aggregate_token_usage,
+            COALESCE(ud.first_name, 'Judgment') || ' ' || COALESCE(ud.last_name, 'Customer') AS creator,
+            (
+                SELECT jsonb_object_agg(sc.name, sc.score_summary)
+                FROM (
+                    SELECT
+                        sd.name,
+                        jsonb_build_object(
+                            'mean', ROUND(AVG(sd.score)::numeric, 2),
+                            'success', BOOL_AND(sd.success)
+                        ) AS score_summary
+                    FROM trace_spans ts
+                    JOIN examples e ON e.trace_span_id = ts.span_id
+                    JOIN scorer_data sd ON sd.example_id = e.example_id
+                    WHERE ts.trace_id = t.trace_id
+                    GROUP BY sd.name
+                ) sc
+            ) AS scores
+        FROM traces t
+        JOIN user_data ud ON t.user_id = ud.id
+        WHERE t.offline_mode = FALSE
+          AND t.project_id = input_project_id
+          AND t.created_at BETWEEN start_time AND end_time
+        ORDER BY t.created_at DESC
+    ) AS trace_info;
+
+    RETURN result_json;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_trace_summaries_by_project_v3"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_trace_summaries_for_experiment_v2"("experiment_run_names_input" "text"[], "project_id_input" "uuid") RETURNS TABLE("experiment_run_id" "uuid", "experiment_name" "text", "experiment_created_at" timestamp with time zone, "creator_name" "text", "is_trace" boolean, "trace_id" "uuid", "trace_name" "text", "latency" integer, "trace_created_at" timestamp with time zone, "has_notification" boolean, "aggregate_token_usage" "jsonb", "scorers" "jsonb")
+    LANGUAGE "sql"
+    AS $$
+    SELECT
+        er.id AS experiment_run_id,
+        er.name AS experiment_name,
+        er.created_at AS experiment_created_at,
+        ud.first_name || ' ' || ud.last_name AS creator_name,
+        er.is_trace,
+
+        t.trace_id,
+        t.name AS trace_name,
+        t.duration,
+        t.created_at AS trace_created_at,
+        t.has_notification,
+        t.aggregate_token_usage,
+
+        (
+            SELECT jsonb_object_agg(s.name, s.scores)
+            FROM (
+                SELECT
+                    sd.name,
+                    jsonb_agg(sd.score) FILTER (WHERE sd.score IS NOT NULL) AS scores
+                FROM public.scorer_data sd
+                LEFT JOIN public.examples e ON e.example_id = sd.example_id
+                LEFT JOIN public.trace_spans ts ON ts.span_id = COALESCE(e.trace_span_id, sd.trace_span_id)
+                WHERE ts.trace_id = t.trace_id
+                GROUP BY sd.name
+            ) s
+        ) AS scorers
+
+    FROM public.experiment_runs er
+    JOIN public.traces t ON t.experiment_run_id = er.id
+    JOIN public.user_data ud ON ud.id = er.user_id
+    WHERE er.name = ANY (experiment_run_names_input)
+      AND er.project_id = project_id_input
+    ORDER BY er.created_at DESC, t.created_at DESC;
+$$;
+
+
+ALTER FUNCTION "public"."get_trace_summaries_for_experiment_v2"("experiment_run_names_input" "text"[], "project_id_input" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_trace_summaries_for_experiment_v3"("experiment_run_names_input" "text"[], "project_id_input" "uuid") RETURNS SETOF "jsonb"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT jsonb_build_object(
+        'experiment_run_id', er.id,
+        'experiment_name', er.name,
+        'experiment_created_at', er.created_at,
+        'creator_name', ud.first_name || ' ' || ud.last_name,
+        'is_trace', er.is_trace,
+
+        'trace_id', t.trace_id,
+        'trace_name', t.name,
+        'duration', t.duration,
+        'trace_created_at', t.created_at,
+        'has_notification', t.has_notification,
+        'aggregate_token_usage', t.aggregate_token_usage,
+
+        'scorers', (
+            SELECT jsonb_object_agg(
+                s.name,
+                jsonb_build_object(
+                    'mean', s.mean_score,
+                    'success', s.success
+                )
+            )
+            FROM (
+                SELECT
+                    sd.name,
+                    AVG(sd.score) FILTER (WHERE sd.score IS NOT NULL) AS mean_score,
+                    BOOL_AND(sd.success) FILTER (WHERE sd.success IS NOT NULL) AS success
+                FROM public.scorer_data sd
+                LEFT JOIN public.examples e ON e.example_id = sd.example_id
+                LEFT JOIN public.trace_spans ts ON ts.span_id = COALESCE(e.trace_span_id, sd.trace_span_id)
+                WHERE ts.trace_id = t.trace_id
+                GROUP BY sd.name
+            ) s
+        )
+    )
+    FROM public.experiment_runs er
+    JOIN public.traces t ON t.experiment_run_id = er.id
+    JOIN public.user_data ud ON ud.id = er.user_id
+    WHERE er.name = ANY (experiment_run_names_input)
+      AND er.project_id = project_id_input
+    ORDER BY er.created_at DESC, t.created_at DESC;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_trace_summaries_for_experiment_v3"("experiment_run_names_input" "text"[], "project_id_input" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_traces_by_filters"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text", "search_term" "text" DEFAULT NULL::"text", "limit_val" integer DEFAULT 100, "offset_val" integer DEFAULT 0) RETURNS TABLE("trace_id" "uuid", "name" "text", "created_at" timestamp with time zone, "duration" double precision, "project_id" "uuid", "metadata" "jsonb")
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    traces.trace_id,
+    traces.name,
+    traces.created_at,
+    traces.duration,
+    traces.project_id,
+    traces.metadata
+  FROM traces
+  WHERE traces.project_id = ANY(project_ids_array)
+    AND traces.created_at >= start_date_iso::timestamp
+    AND traces.created_at <= end_date_iso::timestamp
+    AND (search_term IS NULL OR traces.name ILIKE '%' || search_term || '%')
+  ORDER BY traces.created_at DESC
+  LIMIT limit_val
+  OFFSET offset_val;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_traces_by_filters"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text", "search_term" "text", "limit_val" integer, "offset_val" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_traces_by_projects_and_date"("project_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) RETURNS TABLE("trace_id" "uuid", "project_id" "uuid", "created_at" timestamp with time zone, "user_id" "uuid", "duration_ms" double precision)
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    t.trace_id,
+    t.project_id,
+    t.created_at,
+    t.user_id,
+    t.duration_ms
+  FROM traces t
+  WHERE t.project_id = ANY(project_ids)
+  AND t.created_at >= start_date
+  AND t.created_at <= end_date;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_traces_by_projects_and_date"("project_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_user_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text" DEFAULT '7d'::"text", "p_project_name" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_start_date TIMESTAMP WITH TIME ZONE;
+  v_project_ids UUID[];
+  v_result JSONB;
+BEGIN
+  -- Get start date from time range
+  v_start_date := get_start_date_from_time_range(p_time_range);
+  
+  -- Get project IDs for the organization
+  SELECT get_project_ids_for_org(p_organization_id, p_project_name) INTO v_project_ids;
+  
+  -- Return empty result if no projects found
+  IF v_project_ids IS NULL OR array_length(v_project_ids, 1) = 0 THEN
+    RETURN '[]'::JSONB;
+  END IF;
+  
+  -- Calculate user usage metrics
+  WITH user_metrics AS (
+    SELECT
+      t.user_id,
+      COUNT(t.trace_id) AS trace_count,
+      COALESCE(SUM((t.token_counts->>'total_tokens')::FLOAT), 0) AS total_tokens,
+      0.0 AS total_cost -- Placeholder since cost column doesn't exist
+    FROM traces t
+    WHERE t.project_id = ANY(v_project_ids)
+      AND t.created_at >= v_start_date
+    GROUP BY t.user_id
+    ORDER BY COUNT(t.trace_id) DESC
+  ),
+  user_with_email AS (
+    SELECT
+      um.user_id,
+      COALESCE(ud.user_email, 'unknown') AS email,
+      COALESCE(ud.first_name, 'User') AS first_name,
+      COALESCE(ud.last_name, '') AS last_name,
+      um.trace_count,
+      um.total_tokens,
+      um.total_cost
+    FROM user_metrics um
+    LEFT JOIN user_data ud ON um.user_id::TEXT = ud.id::TEXT
+  )
+  SELECT jsonb_agg(
+    jsonb_build_object(
+      'userId', user_id,
+      'email', email,
+      'firstName', first_name,
+      'lastName', last_name,
+      'traceCount', trace_count,
+      'totalTokens', total_tokens,
+      'totalCost', total_cost
+    )
+  ) INTO v_result
+  FROM user_with_email;
+  
+  RETURN COALESCE(v_result, '[]'::JSONB);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_user_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."handle_new_user_data"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$DECLARE
@@ -1001,19 +2755,19 @@ BEGIN
   -- Insert a new row into user_data including name, email, and defaults
   INSERT INTO public.user_data (
 	id,
-	user_email,    	-- Added
-	first_name,    	-- Added
-	last_name,     	-- Added
+	user_email,
+	first_name,
+	last_name,
 	model_cost,
 	judgment_api_key
   )
   VALUES (
-	NEW.id,                                   	-- Map ID from auth.users
-	NEW.email,                                	-- Get email from auth.users
-	NEW.raw_user_meta_data ->> 'first_name',  	-- Get first_name from metadata
-	NEW.raw_user_meta_data ->> 'last_name',   	-- Get last_name from metadata
-	default_model_cost,                       	-- Your default model_cost
-	generated_judgment_api_key                	-- Your generated judgment_api_key
+	NEW.id,
+	NEW.email,
+	COALESCE(NEW.raw_user_meta_data ->> 'first_name', 'Judgment'),
+  COALESCE(NEW.raw_user_meta_data ->> 'last_name', 'Customer'),
+	default_model_cost,
+	generated_judgment_api_key
   );
 
   -- Keep your existing logic for api_key_to_id table
@@ -1025,6 +2779,7 @@ BEGIN
 	NEW.id,
 	generated_judgment_api_key
   );
+
 
   RAISE NOTICE 'Inserted new user data for user ID: % with judgment_api_key: %', NEW.id, generated_judgment_api_key;
   RETURN NEW;
@@ -1180,6 +2935,82 @@ $$;
 ALTER FUNCTION "public"."increment_user_org_traces_ran"("p_user_id" "uuid", "p_org_id" "uuid", "p_increment" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."insert_example_with_scorer_data"("example_row" "jsonb", "scorer_data_rows" "jsonb") RETURNS TABLE("example_id" "uuid", "inserted_example" "jsonb", "inserted_scorer_data" "jsonb")
+    LANGUAGE "plpgsql"
+    AS $$
+declare
+  new_example_id uuid;
+  scorer_item jsonb; -- Declare the loop variable type explicitly
+  inserted_scorer_row jsonb; -- To hold the JSON of the newly inserted scorer_data row
+  all_inserted_scorers jsonb := '[]'::jsonb; -- Accumulator for all inserted scorer_data rows
+begin
+  -- Insert the example and get its ID
+  insert into public.examples (
+    input, actual_output, expected_output, context, retrieval_context,
+    additional_metadata, tools_called, expected_tools, name, dataset_id,
+    sequence_id, sequence_order, trace_span_id, experiment_run_id
+  )
+  values (
+    example_row->'input',
+    example_row->'actual_output',
+    example_row->'expected_output',
+    example_row->'context',
+    example_row->'retrieval_context',
+    example_row->'additional_metadata',
+    example_row->'tools_called',
+    example_row->'expected_tools',
+    example_row->>'name',
+    (example_row->>'dataset_id')::uuid,
+    (example_row->>'sequence_id')::uuid,
+    (example_row->>'sequence_order')::integer,
+    (example_row->>'trace_span_id')::uuid,
+    (example_row->>'experiment_run_id')::uuid
+  )
+  returning examples.example_id into new_example_id;
+
+  -- Insert each scorer_data row, referencing the new example_id
+  -- The 'value' column is the default output column name for jsonb_array_elements
+  for scorer_item in select value from jsonb_array_elements(scorer_data_rows) loop
+    insert into public.scorer_data (
+      example_id, sequence_id, name, error, score, reason, success, threshold,
+      strict_mode, verbose_logs, evaluation_cost, evaluation_model, additional_metadata, trace_span_id
+    )
+    values (
+      new_example_id,
+      (scorer_item->>'sequence_id')::uuid,
+      scorer_item->>'name',
+      scorer_item->>'error',
+      (scorer_item->>'score')::real,
+      scorer_item->>'reason',
+      (scorer_item->>'success')::boolean,
+      (scorer_item->>'threshold')::real,
+      (scorer_item->>'strict_mode')::boolean,
+      scorer_item->>'verbose_logs',
+      (scorer_item->>'evaluation_cost')::real,
+      scorer_item->>'evaluation_model',
+      scorer_item->'additional_metadata', -- This is JSONB, so use ->
+      (scorer_item->>'trace_span_id')::uuid
+    )
+    returning row_to_json(public.scorer_data.*) into inserted_scorer_row;
+    
+    all_inserted_scorers := all_inserted_scorers || inserted_scorer_row;
+  end loop;
+
+  -- Return the inserted example and scorer_data as JSON
+  return query
+    select
+      e.example_id,
+      row_to_json(e.*) as example_data, 
+      all_inserted_scorers as scorer_data
+    from public.examples e
+    where e.example_id = new_example_id;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."insert_example_with_scorer_data"("example_row" "jsonb", "scorer_data_rows" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."is_usage_based_enabled"("org_id" "uuid") RETURNS boolean
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
@@ -1242,10 +3073,6 @@ CREATE OR REPLACE FUNCTION "public"."new_get_latest_eval_results"("project_id" "
 
 ALTER FUNCTION "public"."new_get_latest_eval_results"("project_id" "uuid", "max_experiments" integer) OWNER TO "postgres";
 
-SET default_tablespace = '';
-
-SET default_table_access_method = "heap";
-
 
 CREATE TABLE IF NOT EXISTS "public"."datasets" (
     "dataset_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
@@ -1254,7 +3081,8 @@ CREATE TABLE IF NOT EXISTS "public"."datasets" (
     "comments" "text",
     "source_file" "text",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "is_sequence" boolean DEFAULT false NOT NULL
+    "is_trace" boolean,
+    "cluster_id" "text"
 );
 
 
@@ -1341,8 +3169,6 @@ CREATE TABLE IF NOT EXISTS "public"."examples" (
     "name" "text",
     "created_at" timestamp with time zone DEFAULT ("now"() AT TIME ZONE 'utc'::"text"),
     "dataset_id" "uuid",
-    "sequence_id" "uuid",
-    "sequence_order" integer,
     "trace_span_id" "uuid",
     "experiment_run_id" "uuid"
 );
@@ -1952,8 +3778,7 @@ ALTER FUNCTION "public"."validate_slack_token_ownership"("token_team_id" "text",
 
 CREATE TABLE IF NOT EXISTS "public"."alerts" (
     "id" "uuid" NOT NULL,
-    "user_id" "uuid" NOT NULL,
-    "example_id" "text" NOT NULL,
+    "example_id" "uuid" NOT NULL,
     "rule_name" "text" NOT NULL,
     "status" "text" NOT NULL,
     "conditions_result" "jsonb",
@@ -2000,6 +3825,16 @@ COMMENT ON TABLE "public"."api_key_to_id" IS 'Map user''s Judgment API Key to th
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."clusters" (
+    "status" "text",
+    "cluster_id" "text" NOT NULL,
+    "cluster_identifier" "text"
+);
+
+
+ALTER TABLE "public"."clusters" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."custom_scorers" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "name" "text" NOT NULL,
@@ -2020,12 +3855,24 @@ COMMENT ON COLUMN "public"."custom_scorers"."slug" IS 'Uniquely identify scorer'
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."dataset_traces" (
+    "dataset_id" "uuid" NOT NULL,
+    "trace_id" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "public"."dataset_traces" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."experiment_runs" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
     "name" "text" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
-    "project_id" "uuid" NOT NULL
+    "project_id" "uuid" NOT NULL,
+    "is_trace" boolean,
+    "cluster_id" "text"
 );
 
 
@@ -2090,6 +3937,7 @@ CREATE TABLE IF NOT EXISTS "public"."organizations" (
     "on_demand_judgees" integer DEFAULT 0,
     "on_demand_traces" integer DEFAULT 0,
     "usage_based_enabled" boolean DEFAULT false,
+    "last_billed" timestamp with time zone,
     CONSTRAINT "check_judgees_ran_non_negative" CHECK (("judgees_ran" >= 0)),
     CONSTRAINT "check_traces_ran_non_negative" CHECK (("traces_ran" >= 0))
 );
@@ -2123,36 +3971,6 @@ CREATE TABLE IF NOT EXISTS "public"."projects" (
 ALTER TABLE "public"."projects" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."request_logs" (
-    "id" bigint NOT NULL,
-    "created_at" timestamp with time zone DEFAULT "now"(),
-    "model" "text" DEFAULT ''::"text",
-    "messages" "json" DEFAULT '{}'::"json",
-    "response" "json" DEFAULT '{}'::"json",
-    "status" "text" DEFAULT ''::"text",
-    "error" "json" DEFAULT '{}'::"json",
-    "response_time" real DEFAULT '0'::real,
-    "total_cost" real,
-    "additional_details" "json" DEFAULT '{}'::"json",
-    "litellm_call_id" "text",
-    "end_user" "uuid"
-);
-
-
-ALTER TABLE "public"."request_logs" OWNER TO "postgres";
-
-
-ALTER TABLE "public"."request_logs" ALTER COLUMN "id" ADD GENERATED BY DEFAULT AS IDENTITY (
-    SEQUENCE NAME "public"."request_logs_id_seq"
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1
-);
-
-
-
 CREATE TABLE IF NOT EXISTS "public"."scheduled_reports" (
     "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -2181,7 +3999,6 @@ ALTER TABLE "public"."scheduled_reports" OWNER TO "postgres";
 CREATE TABLE IF NOT EXISTS "public"."scorer_data" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "example_id" "uuid",
-    "sequence_id" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "name" "text",
     "error" "text",
@@ -2193,7 +4010,8 @@ CREATE TABLE IF NOT EXISTS "public"."scorer_data" (
     "verbose_logs" "text",
     "evaluation_cost" real,
     "evaluation_model" "text",
-    "additional_metadata" "jsonb"
+    "additional_metadata" "jsonb",
+    "trace_span_id" "uuid"
 );
 
 
@@ -2212,23 +4030,6 @@ CREATE TABLE IF NOT EXISTS "public"."self_hosted_endpoints" (
 ALTER TABLE "public"."self_hosted_endpoints" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."sequences" (
-    "sequence_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "name" "text" DEFAULT ''::"text",
-    "dataset_id" "uuid",
-    "sequence_order" integer,
-    "parent_sequence_id" "uuid",
-    "inputs" "text",
-    "output" "text",
-    "root_sequence_id" "uuid" NOT NULL,
-    "experiment_run_id" "uuid"
-);
-
-
-ALTER TABLE "public"."sequences" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "public"."slack_configs" (
     "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
     "team_id" "text" NOT NULL,
@@ -2244,39 +4045,6 @@ CREATE TABLE IF NOT EXISTS "public"."slack_configs" (
 ALTER TABLE "public"."slack_configs" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."trace_span_token_usage" (
-    "trace_span_id" "uuid" NOT NULL,
-    "prompt_tokens" integer DEFAULT 0,
-    "completion_tokens" integer DEFAULT 0,
-    "total_tokens" integer DEFAULT 0,
-    "prompt_tokens_cost_usd" numeric(10,6) DEFAULT 0,
-    "completion_tokens_cost_usd" numeric(10,6) DEFAULT 0,
-    "total_cost_usd" numeric(10,6) DEFAULT 0,
-    "created_at" timestamp with time zone DEFAULT "now"()
-);
-
-
-ALTER TABLE "public"."trace_span_token_usage" OWNER TO "postgres";
-
-
-CREATE TABLE IF NOT EXISTS "public"."trace_spans" (
-    "span_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "parent_span_id" "uuid",
-    "created_at" timestamp with time zone,
-    "function" "text",
-    "depth" integer,
-    "span_type" "text",
-    "inputs" "jsonb",
-    "output" "jsonb",
-    "duration" real,
-    "trace_id" "uuid",
-    "annotation" "jsonb"
-);
-
-
-ALTER TABLE "public"."trace_spans" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "public"."traces" (
     "created_at" timestamp with time zone NOT NULL,
     "trace_id" "uuid" NOT NULL,
@@ -2287,7 +4055,13 @@ CREATE TABLE IF NOT EXISTS "public"."traces" (
     "project_id" "uuid" NOT NULL,
     "has_notification" boolean DEFAULT false,
     "entries" "jsonb",
-    "aggregate_token_usage" "jsonb" DEFAULT '{}'::"jsonb"
+    "aggregate_token_usage" "jsonb" DEFAULT '{}'::"jsonb",
+    "customer_id" "text",
+    "tags" "text"[],
+    "cluster_id" "text",
+    "dataset_id" "uuid",
+    "experiment_run_id" "uuid",
+    "offline_mode" boolean DEFAULT false
 );
 
 
@@ -2302,16 +4076,25 @@ COMMENT ON COLUMN "public"."traces"."has_notification" IS 'Indicates whether a n
 
 
 
+COMMENT ON COLUMN "public"."traces"."customer_id" IS 'the customer_id of the customer of our users using the agent';
+
+
+
+COMMENT ON COLUMN "public"."traces"."tags" IS 'optional tags for each trace';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."user_data" (
     "id" "uuid" NOT NULL,
     "model_cost" "jsonb",
     "judgment_api_key" "uuid",
-    "first_name" "text" DEFAULT 'Customer'::"text",
-    "last_name" "text" DEFAULT 'NULL'::"text",
+    "first_name" "text" DEFAULT 'Judgment'::"text" NOT NULL,
+    "last_name" "text" DEFAULT 'Customer'::"text" NOT NULL,
     "judgee_ran" integer DEFAULT 0 NOT NULL,
     "traces_ran" integer DEFAULT 0 NOT NULL,
     "user_email" "text",
     "user_tier" "text" DEFAULT 'developer'::"text",
+    "onboarded" boolean DEFAULT false,
     CONSTRAINT "user_data_first_name_check" CHECK (("length"("first_name") < 50)),
     CONSTRAINT "user_data_last_name_check" CHECK (("length"("last_name") < 50)),
     CONSTRAINT "user_data_tier_check" CHECK (("user_tier" = ANY (ARRAY['developer'::"text", 'pro'::"text", 'enterprise'::"text"])))
@@ -2414,8 +4197,18 @@ ALTER TABLE ONLY "public"."api_key_to_id"
 
 
 
+ALTER TABLE ONLY "public"."clusters"
+    ADD CONSTRAINT "clusters_pkey" PRIMARY KEY ("cluster_id");
+
+
+
 ALTER TABLE ONLY "public"."custom_scorers"
     ADD CONSTRAINT "custom_scorers_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."dataset_traces"
+    ADD CONSTRAINT "dataset_traces_pkey" PRIMARY KEY ("dataset_id", "trace_id");
 
 
 
@@ -2469,16 +4262,6 @@ ALTER TABLE ONLY "public"."projects"
 
 
 
-ALTER TABLE ONLY "public"."request_logs"
-    ADD CONSTRAINT "request_logs_litellm_call_id_key" UNIQUE ("litellm_call_id");
-
-
-
-ALTER TABLE ONLY "public"."request_logs"
-    ADD CONSTRAINT "request_logs_pkey" PRIMARY KEY ("id");
-
-
-
 ALTER TABLE ONLY "public"."scheduled_reports"
     ADD CONSTRAINT "scheduled_reports_pkey" PRIMARY KEY ("id");
 
@@ -2491,11 +4274,6 @@ ALTER TABLE ONLY "public"."scorer_data"
 
 ALTER TABLE ONLY "public"."self_hosted_endpoints"
     ADD CONSTRAINT "self_hosted_endpoints_pkey" PRIMARY KEY ("url");
-
-
-
-ALTER TABLE ONLY "public"."sequences"
-    ADD CONSTRAINT "sequences_pkey" PRIMARY KEY ("sequence_id");
 
 
 
@@ -2567,7 +4345,27 @@ CREATE INDEX "idx_alerts_rule_id" ON "public"."alerts" USING "btree" ("rule_id")
 
 
 
+CREATE INDEX "idx_dataset_id" ON "public"."datasets" USING "btree" ("dataset_id");
+
+
+
+CREATE INDEX "idx_examples_dataset_id" ON "public"."examples" USING "btree" ("dataset_id");
+
+
+
+CREATE INDEX "idx_examples_experiment_run_id" ON "public"."examples" USING "btree" ("experiment_run_id");
+
+
+
 CREATE INDEX "idx_examples_trace_span_id" ON "public"."examples" USING "btree" ("trace_span_id");
+
+
+
+CREATE INDEX "idx_experiment_runs_project_id" ON "public"."experiment_runs" USING "btree" ("project_id");
+
+
+
+CREATE INDEX "idx_projects_organization_id" ON "public"."projects" USING "btree" ("organization_id", "project_id");
 
 
 
@@ -2587,11 +4385,55 @@ CREATE INDEX "idx_scorer_data_example_id" ON "public"."scorer_data" USING "btree
 
 
 
-CREATE INDEX "idx_scorer_data_sequence_id" ON "public"."scorer_data" USING "btree" ("sequence_id");
+CREATE INDEX "idx_scorer_data_trace_span_id" ON "public"."scorer_data" USING "btree" ("trace_span_id");
+
+
+
+CREATE INDEX "idx_token_usage_span_created" ON "public"."trace_span_token_usage" USING "btree" ("trace_span_id", "created_at");
+
+
+
+CREATE INDEX "idx_trace_spans_error_created_at" ON "public"."trace_spans" USING "btree" ("created_at" DESC) WHERE ("error" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_trace_spans_error_gin" ON "public"."trace_spans" USING "gin" ("error") WHERE ("error" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_trace_spans_error_not_null" ON "public"."trace_spans" USING "btree" ("trace_id") WHERE ("error" IS NOT NULL);
 
 
 
 CREATE INDEX "idx_trace_spans_trace_id" ON "public"."trace_spans" USING "btree" ("trace_id");
+
+
+
+CREATE INDEX "idx_trace_spans_trace_type_created" ON "public"."trace_spans" USING "btree" ("trace_id", "span_type", "created_at");
+
+
+
+CREATE INDEX "idx_traces_customer_id_created_at" ON "public"."traces" USING "btree" ("customer_id", "created_at") WHERE ("customer_id" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_traces_customer_id_not_null" ON "public"."traces" USING "btree" ("customer_id") WHERE (("customer_id" IS NOT NULL) AND ("customer_id" <> ''::"text"));
+
+
+
+CREATE INDEX "idx_traces_project_created_at" ON "public"."traces" USING "btree" ("project_id", "created_at" DESC);
+
+
+
+CREATE INDEX "idx_traces_project_created_customer" ON "public"."traces" USING "btree" ("project_id", "created_at", "customer_id") WHERE ("customer_id" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_traces_project_customer_created" ON "public"."traces" USING "btree" ("project_id", "customer_id", "created_at") WHERE ("customer_id" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_traces_project_customer_created_at" ON "public"."traces" USING "btree" ("project_id", "customer_id", "created_at") WHERE ("customer_id" IS NOT NULL);
 
 
 
@@ -2643,17 +4485,13 @@ CREATE OR REPLACE TRIGGER "update_user_org_resources_updated_at" BEFORE UPDATE O
 
 
 
-CREATE OR REPLACE TRIGGER "on_user_registration" AFTER INSERT ON "auth"."users" FOR EACH ROW EXECUTE FUNCTION "public"."handle_new_user_data"();
+ALTER TABLE ONLY "public"."alerts"
+    ADD CONSTRAINT "alerts_example_id_fkey" FOREIGN KEY ("example_id") REFERENCES "public"."examples"("example_id");
 
 
 
 ALTER TABLE ONLY "public"."alerts"
     ADD CONSTRAINT "alerts_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("project_id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."alerts"
-    ADD CONSTRAINT "alerts_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id");
 
 
 
@@ -2672,6 +4510,11 @@ ALTER TABLE ONLY "public"."custom_scorers"
 
 
 
+ALTER TABLE ONLY "public"."datasets"
+    ADD CONSTRAINT "datasets_cluster_id_fkey" FOREIGN KEY ("cluster_id") REFERENCES "public"."clusters"("cluster_id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."examples"
     ADD CONSTRAINT "examples_dataset_id_fkey" FOREIGN KEY ("dataset_id") REFERENCES "public"."datasets"("dataset_id") ON UPDATE CASCADE ON DELETE CASCADE;
 
@@ -2683,12 +4526,12 @@ ALTER TABLE ONLY "public"."examples"
 
 
 ALTER TABLE ONLY "public"."examples"
-    ADD CONSTRAINT "examples_sequence_id_fkey" FOREIGN KEY ("sequence_id") REFERENCES "public"."sequences"("sequence_id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."examples"
     ADD CONSTRAINT "examples_trace_span_id_fkey" FOREIGN KEY ("trace_span_id") REFERENCES "public"."trace_spans"("span_id") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."experiment_runs"
+    ADD CONSTRAINT "experiment_runs_cluster_id_fkey" FOREIGN KEY ("cluster_id") REFERENCES "public"."clusters"("cluster_id") ON DELETE SET NULL;
 
 
 
@@ -2707,8 +4550,13 @@ ALTER TABLE ONLY "public"."api_key_to_id"
 
 
 
-ALTER TABLE ONLY "public"."request_logs"
-    ADD CONSTRAINT "fk_user" FOREIGN KEY ("end_user") REFERENCES "auth"."users"("id");
+ALTER TABLE ONLY "public"."dataset_traces"
+    ADD CONSTRAINT "fk_dataset" FOREIGN KEY ("dataset_id") REFERENCES "public"."datasets"("dataset_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."dataset_traces"
+    ADD CONSTRAINT "fk_trace" FOREIGN KEY ("trace_id") REFERENCES "public"."traces"("trace_id") ON DELETE CASCADE;
 
 
 
@@ -2732,23 +4580,18 @@ ALTER TABLE ONLY "public"."projects"
 
 
 
+ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "public"."organizations"("id") ON UPDATE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."scorer_data"
     ADD CONSTRAINT "scorer_data_example_id_fkey" FOREIGN KEY ("example_id") REFERENCES "public"."examples"("example_id") ON DELETE CASCADE;
 
 
 
 ALTER TABLE ONLY "public"."scorer_data"
-    ADD CONSTRAINT "scorer_data_sequence_id_fkey" FOREIGN KEY ("sequence_id") REFERENCES "public"."sequences"("sequence_id") ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."sequences"
-    ADD CONSTRAINT "sequences_dataset_id_fkey" FOREIGN KEY ("dataset_id") REFERENCES "public"."datasets"("dataset_id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."sequences"
-    ADD CONSTRAINT "sequences_experiment_run_id_fkey" FOREIGN KEY ("experiment_run_id") REFERENCES "public"."experiment_runs"("id") ON UPDATE CASCADE ON DELETE CASCADE;
+    ADD CONSTRAINT "scorer_data_trace_span_id_fkey" FOREIGN KEY ("trace_span_id") REFERENCES "public"."trace_spans"("span_id") ON DELETE CASCADE;
 
 
 
@@ -2759,6 +4602,21 @@ ALTER TABLE ONLY "public"."trace_span_token_usage"
 
 ALTER TABLE ONLY "public"."trace_spans"
     ADD CONSTRAINT "trace_spans_trace_id_fkey" FOREIGN KEY ("trace_id") REFERENCES "public"."traces"("trace_id") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."traces"
+    ADD CONSTRAINT "traces_cluster_id_fkey" FOREIGN KEY ("cluster_id") REFERENCES "public"."clusters"("cluster_id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."traces"
+    ADD CONSTRAINT "traces_dataset_id_fkey" FOREIGN KEY ("dataset_id") REFERENCES "public"."datasets"("dataset_id");
+
+
+
+ALTER TABLE ONLY "public"."traces"
+    ADD CONSTRAINT "traces_experiment_run_id_fkey" FOREIGN KEY ("experiment_run_id") REFERENCES "public"."experiment_runs"("id") ON DELETE CASCADE;
 
 
 
@@ -2843,10 +4701,19 @@ ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."traces";
 
 
 
+
+
+
 GRANT USAGE ON SCHEMA "public" TO "postgres";
 GRANT USAGE ON SCHEMA "public" TO "anon";
 GRANT USAGE ON SCHEMA "public" TO "authenticated";
 GRANT USAGE ON SCHEMA "public" TO "service_role";
+
+
+
+
+
+
 
 
 
@@ -3282,6 +5149,24 @@ GRANT ALL ON FUNCTION "public"."backfill_token_usage_from_traces"("days_back" in
 
 
 
+GRANT ALL ON FUNCTION "public"."batch_update_trace_metadata"("trace_ids_array" "uuid"[], "metadata_json" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."batch_update_trace_metadata"("trace_ids_array" "uuid"[], "metadata_json" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."batch_update_trace_metadata"("trace_ids_array" "uuid"[], "metadata_json" "jsonb") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."calculate_percentiles"("p_values" numeric[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."calculate_percentiles"("p_values" numeric[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."calculate_percentiles"("p_values" numeric[]) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."calculate_percentiles"("p_values" "anyarray") TO "anon";
+GRANT ALL ON FUNCTION "public"."calculate_percentiles"("p_values" "anyarray") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."calculate_percentiles"("p_values" "anyarray") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."check_and_reset_organizations"("days_between_resets" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."check_and_reset_organizations"("days_between_resets" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."check_and_reset_organizations"("days_between_resets" integer) TO "service_role";
@@ -3342,15 +5227,45 @@ GRANT ALL ON FUNCTION "public"."decrement_user_org_traces_ran"("user_id" "uuid",
 
 
 
+GRANT ALL ON FUNCTION "public"."fetch_detailed_trace_errors_by_projects"("project_ids_array" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone, "limit_results" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."fetch_detailed_trace_errors_by_projects"("project_ids_array" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone, "limit_results" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fetch_detailed_trace_errors_by_projects"("project_ids_array" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone, "limit_results" integer) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_auth_users"("user_ids" "uuid"[]) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_auth_users"("user_ids" "uuid"[]) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_auth_users"("user_ids" "uuid"[]) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."get_customer_usage_metrics"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_customer_usage_metrics"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_customer_usage_metrics"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_dashboard_summary"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_dashboard_summary"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_dashboard_summary"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_sequence"("input_project_id" "uuid", "input_is_sequence" boolean) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_trace"("input_project_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_trace"("input_project_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_dataset_aliases_by_project_and_trace"("input_project_id" "uuid") TO "service_role";
 
 
 
@@ -3372,15 +5287,57 @@ GRANT ALL ON FUNCTION "public"."get_dataset_stats_by_project"("input_project_id"
 
 
 
+GRANT ALL ON FUNCTION "public"."get_dataset_stats_by_project_v2"("input_project_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_dataset_stats_by_project_v2"("input_project_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_dataset_stats_by_project_v2"("input_project_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_examples_for_experiment_run"("project_id_input" "uuid", "experiment_name_input" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_examples_for_experiment_run"("project_id_input" "uuid", "experiment_name_input" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_examples_for_experiment_run"("project_id_input" "uuid", "experiment_name_input" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_experiment_runs_by_ids"("experiment_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_experiment_runs_by_ids"("experiment_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_experiment_runs_by_ids"("experiment_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project_v2"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project_v2"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project_v2"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project_v3"("project_id_input" "uuid", "start_timestamp_input" timestamp without time zone, "end_timestamp_input" timestamp without time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project_v3"("project_id_input" "uuid", "start_timestamp_input" timestamp without time zone, "end_timestamp_input" timestamp without time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project_v3"("project_id_input" "uuid", "start_timestamp_input" timestamp without time zone, "end_timestamp_input" timestamp without time zone) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project_v4"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project_v4"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_experiment_summaries_by_project_v4"("project_id_input" "uuid", "start_timestamp_input" timestamp with time zone, "end_timestamp_input" timestamp with time zone) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_experiments_by_project"("input_project_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_latency_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_latency_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_latency_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "service_role";
 
 
 
@@ -3393,6 +5350,30 @@ GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid") T
 GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "run_limit" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "run_limit" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_latest_eval_result_runs"("project" "uuid", "run_limit" integer) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_llm_span_details"("trace_ids_array" "uuid"[], "start_date_iso" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_llm_span_details"("trace_ids_array" "uuid"[], "start_date_iso" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_llm_span_details"("trace_ids_array" "uuid"[], "start_date_iso" "text") TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."trace_spans" TO "anon";
+GRANT ALL ON TABLE "public"."trace_spans" TO "authenticated";
+GRANT ALL ON TABLE "public"."trace_spans" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_llm_spans_by_trace_ids"("trace_ids_array" "uuid"[], "start_date_iso" "text", "span_type_filter" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_llm_spans_by_trace_ids"("trace_ids_array" "uuid"[], "start_date_iso" "text", "span_type_filter" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_llm_spans_by_trace_ids"("trace_ids_array" "uuid"[], "start_date_iso" "text", "span_type_filter" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_llm_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_llm_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_llm_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "service_role";
 
 
 
@@ -3414,6 +5395,12 @@ GRANT ALL ON FUNCTION "public"."get_project_id"("input_project_name" "text", "in
 
 
 
+GRANT ALL ON FUNCTION "public"."get_project_ids_for_org"("p_organization_id" "uuid", "p_project_name" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_project_ids_for_org"("p_organization_id" "uuid", "p_project_name" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_project_ids_for_org"("p_organization_id" "uuid", "p_project_name" "text") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid") TO "service_role";
@@ -3423,6 +5410,24 @@ GRANT ALL ON FUNCTION "public"."get_project_stats"("org_id" "uuid", "u_id" "uuid
 GRANT ALL ON FUNCTION "public"."get_project_summaries"("org_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_project_summaries"("org_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_project_summaries"("org_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_project_summaries_v2"("org_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_project_summaries_v2"("org_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_project_summaries_v2"("org_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_project_summaries_v3"("org_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_project_summaries_v3"("org_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_project_summaries_v3"("org_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_project_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_project_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_project_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "service_role";
 
 
 
@@ -3438,9 +5443,63 @@ GRANT ALL ON FUNCTION "public"."get_slack_team_ids_for_user"("user_uuid" "uuid")
 
 
 
+GRANT ALL ON FUNCTION "public"."get_spans_by_trace_ids"("trace_ids" "uuid"[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_spans_by_trace_ids"("trace_ids" "uuid"[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_spans_by_trace_ids"("trace_ids" "uuid"[]) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_start_date_from_time_range"("p_time_range" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_start_date_from_time_range"("p_time_range" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_start_date_from_time_range"("p_time_range" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_token_breakdown_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_token_breakdown_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_token_breakdown_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_token_usage_by_span_ids"("span_ids" "uuid"[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_token_usage_by_span_ids"("span_ids" "uuid"[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_token_usage_by_span_ids"("span_ids" "uuid"[]) TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."trace_span_token_usage" TO "anon";
+GRANT ALL ON TABLE "public"."trace_span_token_usage" TO "authenticated";
+GRANT ALL ON TABLE "public"."trace_span_token_usage" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_token_usage_for_spans"("span_ids_array" "uuid"[], "start_date_iso" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_token_usage_for_spans"("span_ids_array" "uuid"[], "start_date_iso" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_token_usage_for_spans"("span_ids_array" "uuid"[], "start_date_iso" "text") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_tokens_for_user"("user_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_tokens_for_user"("user_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_tokens_for_user"("user_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_tool_spans_by_trace_ids"("trace_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_tool_spans_by_trace_ids"("trace_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_tool_spans_by_trace_ids"("trace_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_tool_usage_for_traces"("trace_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_tool_usage_for_traces"("trace_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_tool_usage_for_traces"("trace_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_tool_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_tool_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_tool_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "service_role";
 
 
 
@@ -3450,9 +5509,57 @@ GRANT ALL ON FUNCTION "public"."get_trace_aggregates"("input_project_id" "uuid",
 
 
 
+GRANT ALL ON FUNCTION "public"."get_trace_spans_paginated"("trace_ids_array" "uuid"[], "span_type_filter" "text", "start_date_iso" "text", "limit_val" integer, "offset_val" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_trace_spans_paginated"("trace_ids_array" "uuid"[], "span_type_filter" "text", "start_date_iso" "text", "limit_val" integer, "offset_val" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_trace_spans_paginated"("trace_ids_array" "uuid"[], "span_type_filter" "text", "start_date_iso" "text", "limit_val" integer, "offset_val" integer) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project_v2"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project_v2"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project_v2"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project_v3"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project_v3"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_by_project_v3"("input_project_id" "uuid", "start_time" timestamp with time zone, "end_time" timestamp with time zone) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_for_experiment_v2"("experiment_run_names_input" "text"[], "project_id_input" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_for_experiment_v2"("experiment_run_names_input" "text"[], "project_id_input" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_for_experiment_v2"("experiment_run_names_input" "text"[], "project_id_input" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_for_experiment_v3"("experiment_run_names_input" "text"[], "project_id_input" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_for_experiment_v3"("experiment_run_names_input" "text"[], "project_id_input" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_trace_summaries_for_experiment_v3"("experiment_run_names_input" "text"[], "project_id_input" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_traces_by_filters"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text", "search_term" "text", "limit_val" integer, "offset_val" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_traces_by_filters"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text", "search_term" "text", "limit_val" integer, "offset_val" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_traces_by_filters"("project_ids_array" "uuid"[], "start_date_iso" "text", "end_date_iso" "text", "search_term" "text", "limit_val" integer, "offset_val" integer) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_traces_by_projects_and_date"("project_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_traces_by_projects_and_date"("project_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_traces_by_projects_and_date"("project_ids" "uuid"[], "start_date" timestamp with time zone, "end_date" timestamp with time zone) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_user_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_user_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_user_usage_metrics"("p_organization_id" "uuid", "p_time_range" "text", "p_project_name" "text") TO "service_role";
 
 
 
@@ -3495,6 +5602,12 @@ GRANT ALL ON FUNCTION "public"."increment_user_org_judgees_ran"("p_user_id" "uui
 GRANT ALL ON FUNCTION "public"."increment_user_org_traces_ran"("p_user_id" "uuid", "p_org_id" "uuid", "p_increment" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."increment_user_org_traces_ran"("p_user_id" "uuid", "p_org_id" "uuid", "p_increment" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."increment_user_org_traces_ran"("p_user_id" "uuid", "p_org_id" "uuid", "p_increment" integer) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."insert_example_with_scorer_data"("example_row" "jsonb", "scorer_data_rows" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."insert_example_with_scorer_data"("example_row" "jsonb", "scorer_data_rows" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."insert_example_with_scorer_data"("example_row" "jsonb", "scorer_data_rows" "jsonb") TO "service_role";
 
 
 
@@ -3714,9 +5827,21 @@ GRANT ALL ON TABLE "public"."api_key_to_id" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."clusters" TO "anon";
+GRANT ALL ON TABLE "public"."clusters" TO "authenticated";
+GRANT ALL ON TABLE "public"."clusters" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."custom_scorers" TO "anon";
 GRANT ALL ON TABLE "public"."custom_scorers" TO "authenticated";
 GRANT ALL ON TABLE "public"."custom_scorers" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."dataset_traces" TO "anon";
+GRANT ALL ON TABLE "public"."dataset_traces" TO "authenticated";
+GRANT ALL ON TABLE "public"."dataset_traces" TO "service_role";
 
 
 
@@ -3762,18 +5887,6 @@ GRANT ALL ON TABLE "public"."projects" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."request_logs" TO "anon";
-GRANT ALL ON TABLE "public"."request_logs" TO "authenticated";
-GRANT ALL ON TABLE "public"."request_logs" TO "service_role";
-
-
-
-GRANT ALL ON SEQUENCE "public"."request_logs_id_seq" TO "anon";
-GRANT ALL ON SEQUENCE "public"."request_logs_id_seq" TO "authenticated";
-GRANT ALL ON SEQUENCE "public"."request_logs_id_seq" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "public"."scheduled_reports" TO "anon";
 GRANT ALL ON TABLE "public"."scheduled_reports" TO "authenticated";
 GRANT ALL ON TABLE "public"."scheduled_reports" TO "service_role";
@@ -3792,27 +5905,9 @@ GRANT ALL ON TABLE "public"."self_hosted_endpoints" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."sequences" TO "anon";
-GRANT ALL ON TABLE "public"."sequences" TO "authenticated";
-GRANT ALL ON TABLE "public"."sequences" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "public"."slack_configs" TO "anon";
 GRANT ALL ON TABLE "public"."slack_configs" TO "authenticated";
 GRANT ALL ON TABLE "public"."slack_configs" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."trace_span_token_usage" TO "anon";
-GRANT ALL ON TABLE "public"."trace_span_token_usage" TO "authenticated";
-GRANT ALL ON TABLE "public"."trace_span_token_usage" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."trace_spans" TO "anon";
-GRANT ALL ON TABLE "public"."trace_spans" TO "authenticated";
-GRANT ALL ON TABLE "public"."trace_spans" TO "service_role";
 
 
 
