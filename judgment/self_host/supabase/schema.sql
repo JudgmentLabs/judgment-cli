@@ -12,7 +12,7 @@ SET client_min_messages = warning;
 SET row_security = off;
 
 
-CREATE EXTENSION IF NOT EXISTS "timescaledb" WITH SCHEMA "extensions";
+-- CREATE EXTENSION IF NOT EXISTS "timescaledb" WITH SCHEMA "extensions";
 
 
 
@@ -4482,6 +4482,10 @@ CREATE OR REPLACE TRIGGER "update_token_usage_trigger" AFTER INSERT ON "public".
 
 
 CREATE OR REPLACE TRIGGER "update_user_org_resources_updated_at" BEFORE UPDATE ON "public"."user_org_resources" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
+CREATE OR REPLACE TRIGGER "on_user_registration" AFTER INSERT ON "auth"."users" FOR EACH ROW EXECUTE FUNCTION "public"."handle_new_user_data"();
 
 
 
