@@ -38,6 +38,11 @@ module iam {
   prod_api_keys_stripe_arn = module.secretsmanager.prod_api_keys_stripe_arn
 }
 
+module lambda {
+  source = "./lambda"
+  lambda_exec_role_arn = module.iam.lambda_exec_role_arn
+}
+
 module mq {
   source = "./mq"
 }
