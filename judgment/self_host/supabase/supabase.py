@@ -11,6 +11,10 @@ from supabase import create_client, Client
 
 load_dotenv()
 
+class NonRootUserError(Exception):
+    """Exception raised when a non-root user attempts to use root-only functionality."""
+    pass
+
 class SupabaseClient:
     def __init__(self, supabase_token: str, org_id: str, db_password: str):
         self.supabase_token = supabase_token
@@ -111,24 +115,83 @@ class SupabaseClient:
             cursor.execute(schema_sql)
 
     def create_root_user(self, supabase_url: str, supabase_service_role_key: str, email: str, password: str):
-        """Create a root user using Supabase Auth API."""
-        print("Creating root user...")
+        """Create a root user using Supabase Auth API or return existing root user if credentials match.
+        
+        Args:
+            supabase_url: The Supabase project URL
+            supabase_service_role_key: The service role key for authentication
+            email: The email of the root user
+            password: The password of the root user
+            
+        Returns:
+            The user ID of the root user (either existing or newly created)
+            
+        Raises:
+            NonRootUserError: If the provided credentials belong to a non-root user
+            Exception: For other errors during user creation or authentication
+        """
+        print("Checking for existing root user with provided credentials...")
         supabase: Client = create_client(supabase_url, supabase_service_role_key)
         
-        # Create the user
         try:
-            response = supabase.auth.admin.create_user({
+            # Try to sign in first
+            sign_in_response = supabase.auth.sign_in_with_password({
                 "email": email,
-                "password": password,
-                "email_confirm": True,  # Auto-confirm the email
-                "user_metadata": {
-                    "role": "root"
-                }
+                "password": password
             })
-        except Exception as e:
-            raise Exception(f"Failed to create root user: {e}")
+            user = sign_in_response.user
+            
+            # Verify this is a root user
+            if user.user_metadata.get("role") != "root":
+                raise NonRootUserError("The provided credentials belong to a non-root user. Please run the command again with root user credentials or new credentials to create a root user with.")
+                
+            print("Found existing root user with matching credentials!")
+            return user.id
+        except NonRootUserError:
+            raise
+        except Exception:
+            # If sign in fails, try to create the user
+            print("Creating new root user...")
+            try:
+                response = supabase.auth.admin.create_user({
+                    "email": email,
+                    "password": password,
+                    "email_confirm": True,  # Auto-confirm the email
+                    "user_metadata": {
+                        "role": "root"
+                    }
+                })
+                print("Root user created successfully!")
+                return response.user.id
+            except Exception as e:
+                raise Exception(f"Failed to create root user: {e}")
+
+    def get_user_api_key_and_org(self, supabase_url: str, supabase_service_role_key: str, user_id: str) -> tuple[str, str]:
+        """Get the user's API key and organization ID after creation.
         
-        print("Root user created successfully!")
+        Args:
+            supabase_url: The Supabase project URL
+            supabase_service_role_key: The service role key for authentication
+            user_id: The ID of the user to get information for
+            
+        Returns:
+            A tuple containing (api_key, organization_id)
+        """
+        supabase: Client = create_client(supabase_url, supabase_service_role_key)
+        
+        # Get the API key from user_data
+        api_key_result = supabase.table("user_data").select("judgment_api_key").eq("id", user_id).execute()
+        if not api_key_result.data:
+            raise Exception(f"No user data found for user {user_id}")
+        api_key = api_key_result.data[0]["judgment_api_key"]
+        
+        # Get the organization ID from user_organizations
+        org_result = supabase.table("user_organizations").select("organization_id").eq("user_id", user_id).execute()
+        if not org_result.data:
+            raise Exception(f"No organization found for user {user_id}")
+        organization_id = org_result.data[0]["organization_id"]
+        
+        return api_key, organization_id
 
     def create_project_and_get_secrets(self, project_name: str = "Judgment Database", supabase_compute_size: str = "small") -> Dict:
         # Check for existing project
